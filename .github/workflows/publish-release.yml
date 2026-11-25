@@ -1,0 +1,60 @@
+name: Publish Release from Artifact
+
+on:
+  push:
+    branches:
+      - "arena/**"
+    paths:
+      - ".github/workflows/publish-release.yml"
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download APK artifact from successful build
+        uses: actions/download-artifact@v4
+        with:
+          name: s7-health-scanner-apk
+          run-id: 45630795664
+          github-token: ${{ github.token }}
+          path: dist
+
+      - name: Verify APK
+        run: ls -la dist/ && file dist/s7-health-scanner.apk
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v1.0.0"
+          {
+            echo "Initial release of S7 Health Scanner."
+            echo ""
+            echo "## What's included"
+            echo "- Android APK: \`s7-health-scanner.apk\`"
+            echo "- File-level storage scan with bit-by-bit pattern verification"
+            echo "- Root-based raw block scan (read-only, via su/dd)"
+            echo "- Damaged file quarantine (moves unreadable files to app-private storage)"
+            echo "- Scan report export"
+            echo ""
+            echo "## Notes"
+            echo "- Without root, Android apps cannot perform true physical sector scans. The app performs file-level reads and bit-pattern verification on accessible storage."
+            echo "- Raw block scan requires root and performs read-only block reads."
+            echo "- Physical bad-sector remapping cannot be performed by an unprivileged Android app."
+          } > /tmp/release-notes.md
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists, updating asset..."
+            gh release upload "$TAG" dist/s7-health-scanner.apk --clobber
+          else
+            gh release create "$TAG" dist/s7-health-scanner.apk \
+              --target "${{ github.sha }}" \
+              --title "v1.0.0 - S7 Health Scanner" \
+              --notes-file /tmp/release-notes.md
+          fi
