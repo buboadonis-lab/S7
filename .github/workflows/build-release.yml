@@ -1,0 +1,75 @@
+name: Build Android APK
+
+on:
+  push:
+    branches:
+      - "arena/**"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: "8.2"
+
+      - name: Accept Android SDK licenses
+        run: yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --licenses || true
+
+      - name: Build debug APK
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Rename APK
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/s7-health-scanner.apk
+          ls -la dist/
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: s7-health-scanner-apk
+          path: dist/s7-health-scanner.apk
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v1.0.0"
+          {
+            echo "Initial release of S7 Health Scanner."
+            echo ""
+            echo "## What's included"
+            echo "- Android APK: \`s7-health-scanner.apk\`"
+            echo "- File-level storage scan with bit-by-bit pattern verification"
+            echo "- Root-based raw block scan (read-only, via su/dd)"
+            echo "- Damaged file quarantine (moves unreadable files to app-private storage)"
+            echo "- Scan report export"
+            echo ""
+            echo "## Notes"
+            echo "- Without root, Android apps cannot perform true physical sector scans. The app performs file-level reads and bit-pattern verification on accessible storage."
+            echo "- Raw block scan requires root and performs read-only block reads."
+            echo "- Physical bad-sector remapping cannot be performed by an unprivileged Android app."
+          } > /tmp/release-notes.md
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists, uploading asset..."
+            gh release upload "$TAG" dist/s7-health-scanner.apk --clobber
+          else
+            gh release create "$TAG" dist/s7-health-scanner.apk \
+              --target "${{ github.sha }}" \
+              --title "v1.0.0 - S7 Health Scanner" \
+              --notes-file /tmp/release-notes.md
+          fi

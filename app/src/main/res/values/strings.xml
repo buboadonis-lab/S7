@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">S7 Health Scanner</string>
+    <string name="scan_storage">Scan Accessible Storage</string>
+    <string name="scan_raw">Scan Raw Block (Root)</string>
+    <string name="stop_scan">Stop Scan</string>
+    <string name="repair">Repair / Mark Unusable</string>
+    <string name="export_report">Export Report</string>
+    <string name="health_unknown">Health: Unknown</string>
+    <string name="status_idle">Ready. Select a scan mode.</string>
+    <string name="disclaimer">Note: Without root access, Android apps cannot perform raw sector-by-sector scans of physical flash memory. File-level scans verify accessible storage by reading files and writing/verifying test patterns. Raw block scanning and bad-block remapping require root and device support.</string>
+</resources>
