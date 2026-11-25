@@ -22,6 +22,9 @@ import com.buboadonis.s7health.model.ScanProgress
 import com.buboadonis.s7health.model.ScanState
 import com.buboadonis.s7health.scanner.RawBlockScanner
 import com.buboadonis.s7health.scanner.StorageScanner
+import com.buboadonis.s7health.util.CheckpointStore
+import com.buboadonis.s7health.util.ScanCheckpoint
+import com.buboadonis.s7health.model.ScanMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -36,6 +39,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private val storageScanner = StorageScanner()
     private val rawScanner = RawBlockScanner()
+    private lateinit var checkpointStore: CheckpointStore
     private var scanJob: Job? = null
     private var lastProgress: ScanProgress = ScanProgress()
     private val logLines = ArrayDeque<String>()
@@ -56,10 +60,12 @@ class MainActivity : AppCompatActivity() {
         binding.btnRepair.setOnClickListener { repairOrMark() }
         binding.btnExport.setOnClickListener { exportReport() }
 
+        checkpointStore = CheckpointStore(this)
         updateUi(lastProgress)
         ensurePermissions()
         appendLog("S7 Health Scanner ready. Target device: Samsung Galaxy S7 Edge (or any Android device).")
         appendLog("File-level scan works without root. Raw block scan requires root.")
+        checkForResume()
     }
 
     private fun ensurePermissions() {
@@ -110,19 +116,26 @@ class MainActivity : AppCompatActivity() {
         launchStorageScan()
     }
 
-    private fun launchStorageScan() {
-        val roots = accessibleRoots()
+    private fun launchStorageScan(resume: ScanCheckpoint? = null, overrideRoots: List<File>? = null) {
+        val roots = overrideRoots ?: accessibleRoots()
         if (roots.isEmpty()) {
             toast("No accessible storage roots found.")
             return
         }
-        appendLog("Starting file-level scan on: ${roots.joinToString { it.absolutePath }}")
+        if (resume == null) checkpointStore.clear()
+        appendLog((if (resume != null) "Resuming" else "Starting") + " file-level scan on: ${roots.joinToString { it.absolutePath }}")
         scanJob = lifecycleScope.launch {
-            val result = storageScanner.scanAccessible(roots, patternTestMb = 16) { progress ->
+            val result = storageScanner.scanAccessible(
+                roots = roots,
+                patternTestMb = 16,
+                resume = resume,
+                onCheckpoint = { checkpointStore.save(it) }
+            ) { progress ->
                 runOnUiThread { updateUi(progress) }
             }
             lastProgress = result
             updateUi(result)
+            if (result.state == ScanState.COMPLETED) checkpointStore.clear()
             appendLog(result.message)
         }
     }
@@ -171,21 +184,30 @@ class MainActivity : AppCompatActivity() {
             .setMessage(
                 "Scan ${device.name} (${device.path}, $sizeText)?\n\n" +
                 "This performs read-only sector/block reads. It may take a long time on large devices. " +
-                "No data is written during scan. If the device is the active system partition, scan it only if you understand the risk of I/O stress."
+                "No data is written during scan. Progress is checkpointed before each chunk so you can resume if the device restarts. " +
+                "If the device is the active system partition, scan it only if you understand the risk of I/O stress."
             )
-            .setPositiveButton("Scan") { _, _ ->
-                appendLog("Starting raw scan: ${device.path}")
-                scanJob = lifecycleScope.launch {
-                    val result = rawScanner.scanBlockDevice(device) { progress ->
-                        runOnUiThread { updateUi(progress) }
-                    }
-                    lastProgress = result
-                    updateUi(result)
-                    appendLog(result.message)
-                }
-            }
+            .setPositiveButton("Scan") { _, _ -> launchRawScan(device) }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+
+    private fun launchRawScan(device: RawBlockScanner.BlockDevice, resume: ScanCheckpoint? = null) {
+        if (resume == null) checkpointStore.clear()
+        appendLog((if (resume != null) "Resuming" else "Starting") + " raw scan: ${device.path}")
+        scanJob = lifecycleScope.launch {
+            val result = rawScanner.scanBlockDevice(
+                device = device,
+                resume = resume,
+                onCheckpoint = { checkpointStore.save(it) }
+            ) { progress ->
+                runOnUiThread { updateUi(progress) }
+            }
+            lastProgress = result
+            updateUi(result)
+            if (result.state == ScanState.COMPLETED) checkpointStore.clear()
+            appendLog(result.message)
+        }
     }
 
     private fun stopScan() {
@@ -363,6 +385,34 @@ class MainActivity : AppCompatActivity() {
 
     private fun appendLogUi(msg: String) {
         runOnUiThread { appendLog(msg) }
+    }
+
+    private fun checkForResume() {
+        val cp = checkpointStore.load() ?: return
+        val ageMin = (System.currentTimeMillis() - cp.timestamp) / 60000L
+        val modeLabel = if (cp.mode == ScanMode.FILE_LEVEL) "File-level scan" else "Raw scan (${cp.target})"
+        AlertDialog.Builder(this)
+            .setTitle("Resume previous scan?")
+            .setMessage("$modeLabel\nProgress: ${RawBlockScanner.formatBytes(cp.bytesScanned)} scanned, ${cp.badRegions.size} issue(s) found.\nSaved ${ageMin} min ago.\n\nResuming avoids re-scanning from the beginning after a restart/crash.")
+            .setPositiveButton("Resume") { _, _ -> resumeScan(cp) }
+            .setNegativeButton("Discard") { _, _ -> checkpointStore.clear() }
+            .show()
+    }
+
+    private fun resumeScan(cp: ScanCheckpoint) {
+        if (scanJob?.isActive == true) { toast("A scan is already running."); return }
+        when (cp.mode) {
+            ScanMode.FILE_LEVEL -> {
+                val roots = cp.roots.map { File(it) }.filter { it.exists() }.ifEmpty { accessibleRoots() }
+                appendLog("Resuming file-level scan from checkpoint (${cp.fileIndex} files, ${RawBlockScanner.formatBytes(cp.bytesScanned)} scanned)...")
+                launchStorageScan(resume = cp, overrideRoots = roots)
+            }
+            ScanMode.RAW_BLOCK -> {
+                val device = RawBlockScanner.BlockDevice(cp.target, File(cp.target).name, cp.rawTotalBytes)
+                appendLog("Resuming raw scan on ${cp.target} from offset ${cp.rawOffsetBytes}...")
+                launchRawScan(device, resume = cp)
+            }
+        }
     }
 
     private fun accessibleRoots(): List<File> {

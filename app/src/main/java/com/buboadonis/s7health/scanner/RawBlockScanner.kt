@@ -5,12 +5,11 @@ import com.buboadonis.s7health.model.HealthStatus
 import com.buboadonis.s7health.model.ScanMode
 import com.buboadonis.s7health.model.ScanProgress
 import com.buboadonis.s7health.model.ScanState
+import com.buboadonis.s7health.util.ScanCheckpoint
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
-import java.io.BufferedReader
 import java.io.File
-import java.io.InputStreamReader
 import kotlin.coroutines.coroutineContext
 import kotlin.math.max
 
@@ -20,10 +19,8 @@ class RawBlockScanner {
 
     fun isRootAvailable(): Boolean {
         return try {
-            val p = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
-            val out = p.inputStream.bufferedReader().readText()
-            val code = p.waitFor()
-            code == 0 && out.contains("uid=0")
+            val r = runSu("id", timeoutMs = 10_000)
+            r.exitCode == 0 && r.stdout.contains("uid=0")
         } catch (_: Throwable) {
             false
         }
@@ -32,7 +29,6 @@ class RawBlockScanner {
     fun listBlockDevices(): List<BlockDevice> {
         val devices = mutableListOf<BlockDevice>()
         try {
-            // Try /dev/block/by-name
             val byName = runSu("ls -1 /dev/block/by-name 2>/dev/null")
             if (byName.exitCode == 0) {
                 byName.stdout.lines().map { it.trim() }.filter { it.isNotEmpty() }.forEach { name ->
@@ -42,7 +38,6 @@ class RawBlockScanner {
                     devices.add(BlockDevice(realPath, name, size))
                 }
             }
-            // Also add common mmcblk devices
             val partitions = runSu("cat /proc/partitions 2>/dev/null")
             if (partitions.exitCode == 0) {
                 partitions.stdout.lines().drop(2).forEach { line ->
@@ -67,7 +62,6 @@ class RawBlockScanner {
         val r = runSu("blockdev --getsize64 $path 2>/dev/null")
         val v = r.stdout.trim().toLongOrNull()
         if (v != null && v > 0) return v
-        // fallback: /sys/class/block
         val name = File(path).name
         val sys = runSu("cat /sys/class/block/$name/size 2>/dev/null")
         val sectors = sys.stdout.trim().toLongOrNull() ?: return 0L
@@ -77,14 +71,40 @@ class RawBlockScanner {
     suspend fun scanBlockDevice(
         device: BlockDevice,
         maxBytes: Long = device.sizeBytes.takeIf { it > 0 } ?: (256L * 1024 * 1024),
+        resume: ScanCheckpoint? = null,
+        onCheckpoint: (ScanCheckpoint) -> Unit = {},
         onProgress: (ScanProgress) -> Unit
     ): ScanProgress = withContext(Dispatchers.IO) {
-        val badRegions = mutableListOf<BadRegion>()
-        var bytesScanned = 0L
-        var readErrors = 0L
+        val badRegions = mutableListOf<BadRegion>().apply { resume?.badRegions?.let { addAll(it) } }
+        var bytesScanned = resume?.bytesScanned ?: 0L
+        var readErrors = resume?.readErrors ?: 0L
         val start = System.currentTimeMillis()
-        val chunkSize = 1024 * 1024L // 1MB chunks
+        val chunkSize = 512 * 1024L // 512KB chunks - smaller for safer resume on bad sectors
         val total = if (device.sizeBytes > 0) minOf(device.sizeBytes, maxBytes) else maxBytes
+        var offset = (resume?.rawOffsetBytes ?: 0L).coerceIn(0L, total)
+
+        // If resuming, checkpoint was saved BEFORE reading offset; skip that chunk to avoid a reboot loop.
+        if (resume != null && offset < total) {
+            val skipCount = minOf(chunkSize, total - offset)
+            badRegions.add(BadRegion(device.path, offset, skipCount, "Skipped on resume: suspected crash/hang/reboot while reading this block"))
+            readErrors++
+            bytesScanned += skipCount
+            offset += skipCount
+        }
+
+        fun saveCheckpoint() {
+            onCheckpoint(
+                ScanCheckpoint(
+                    mode = ScanMode.RAW_BLOCK,
+                    target = device.path,
+                    rawOffsetBytes = offset,
+                    rawTotalBytes = total,
+                    bytesScanned = bytesScanned,
+                    readErrors = readErrors,
+                    badRegions = badRegions.toList()
+                )
+            )
+        }
 
         fun emit(state: ScanState, msg: String) {
             val elapsed = max(1L, System.currentTimeMillis() - start)
@@ -100,22 +120,23 @@ class RawBlockScanner {
                     health = healthFor(badRegions, readErrors),
                     readErrors = readErrors,
                     verifiedBytes = bytesScanned - (readErrors * chunkSize).coerceAtLeast(0L),
-                    speedBytesPerSec = bytesScanned * 1000L / elapsed
+                    speedBytesPerSec = (bytesScanned - (resume?.bytesScanned ?: 0L)).coerceAtLeast(0L) * 1000L / elapsed
                 )
             )
         }
 
         try {
-            emit(ScanState.SCANNING, "Starting raw scan of ${device.name} (${device.path})")
-            var offset = 0L
+            emit(ScanState.SCANNING, if (resume != null) "Resuming raw scan at offset $offset..." else "Starting raw scan of ${device.name} (${device.path})")
             while (offset < total) {
                 coroutineContext.ensureActive()
                 val count = minOf(chunkSize, total - offset)
+                // Checkpoint BEFORE reading so a device reboot on a bad sector allows resume at next chunk
+                saveCheckpoint()
+
                 val skipBlocks = offset / 4096L
                 val countBlocks = (count + 4095L) / 4096L
-                // Read chunk via dd; discard output, check exit code. Use 4096-byte sectors for alignment.
                 val cmd = "dd if=${device.path} bs=4096 skip=$skipBlocks count=$countBlocks of=/dev/null 2>&1; echo __EXIT:$?"
-                val r = runSu(cmd, timeoutMs = 60_000)
+                val r = runSu(cmd, timeoutMs = 30_000)
                 val exitOk = r.stdout.contains("__EXIT:0")
                 bytesScanned += count
                 if (!exitOk) {
@@ -125,15 +146,17 @@ class RawBlockScanner {
                             pathOrDevice = device.path,
                             offsetBytes = offset,
                             lengthBytes = count,
-                            description = "Raw read error at offset $offset (${count} bytes): ${r.stdout.lineSequence().firstOrNull { !it.startsWith("__EXIT:") } ?: "I/O error"}"
+                            description = "Raw read error at offset $offset (${count} bytes): ${r.stdout.lineSequence().firstOrNull { !it.startsWith("__EXIT:") && it.isNotBlank() } ?: "I/O error"}"
                         )
                     )
                 }
-                if (offset % (32L * chunkSize) == 0L || !exitOk) {
-                    emit(ScanState.SCANNING, "Scanned ${formatBytes(bytesScanned)} / ${formatBytes(total)}")
-                }
                 offset += count
+                if (offset % (16L * chunkSize) == 0L || !exitOk) {
+                    saveCheckpoint()
+                    emit(ScanState.SCANNING, "Scanned ${formatBytes(bytesScanned)} / ${formatBytes(total)}" + if (readErrors > 0) " ($readErrors errors)" else "")
+                }
             }
+            saveCheckpoint()
             val msg = "Raw scan complete. ${badRegions.size} bad region(s) found."
             emit(ScanState.COMPLETED, msg)
             ScanProgress(
@@ -147,10 +170,11 @@ class RawBlockScanner {
                 health = healthFor(badRegions, readErrors),
                 readErrors = readErrors,
                 verifiedBytes = bytesScanned,
-                speedBytesPerSec = bytesScanned * 1000L / max(1L, System.currentTimeMillis() - start)
+                speedBytesPerSec = (bytesScanned - (resume?.bytesScanned ?: 0L)).coerceAtLeast(0L) * 1000L / max(1L, System.currentTimeMillis() - start)
             )
         } catch (ce: kotlinx.coroutines.CancellationException) {
-            val msg = "Raw scan cancelled."
+            saveCheckpoint()
+            val msg = "Raw scan cancelled. Progress saved for resume."
             emit(ScanState.CANCELLED, msg)
             ScanProgress(
                 state = ScanState.CANCELLED, mode = ScanMode.RAW_BLOCK, bytesScanned = bytesScanned,
@@ -158,7 +182,8 @@ class RawBlockScanner {
                 message = msg, health = healthFor(badRegions, readErrors), readErrors = readErrors
             )
         } catch (t: Throwable) {
-            val msg = "Raw scan failed: ${t.message}"
+            saveCheckpoint()
+            val msg = "Raw scan failed: ${t.message}. Progress saved for resume."
             emit(ScanState.FAILED, msg)
             ScanProgress(
                 state = ScanState.FAILED, mode = ScanMode.RAW_BLOCK, bytesScanned = bytesScanned,

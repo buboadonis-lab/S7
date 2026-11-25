@@ -5,6 +5,7 @@ import com.buboadonis.s7health.model.HealthStatus
 import com.buboadonis.s7health.model.ScanMode
 import com.buboadonis.s7health.model.ScanProgress
 import com.buboadonis.s7health.model.ScanState
+import com.buboadonis.s7health.util.ScanCheckpoint
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
@@ -22,22 +23,50 @@ class StorageScanner {
     suspend fun scanAccessible(
         roots: List<File>,
         patternTestMb: Int = 16,
+        resume: ScanCheckpoint? = null,
+        onCheckpoint: (ScanCheckpoint) -> Unit = {},
         onProgress: (ScanProgress) -> Unit
     ): ScanProgress = withContext(Dispatchers.IO) {
-        val badRegions = mutableListOf<BadRegion>()
-        var bytesScanned = 0L
-        var readErrors = 0L
-        var writeErrors = 0L
-        var verifiedBytes = 0L
+        val badRegions = mutableListOf<BadRegion>().apply { resume?.badRegions?.let { addAll(it) } }
+        var bytesScanned = resume?.bytesScanned ?: 0L
+        var readErrors = resume?.readErrors ?: 0L
+        var writeErrors = resume?.writeErrors ?: 0L
+        var verifiedBytes = resume?.verifiedBytes ?: 0L
         val start = System.currentTimeMillis()
 
         val files = roots.flatMap { collectReadableFiles(it) }
         val totalEstimate = files.sumOf { it.length().coerceAtLeast(0L) } +
             (patternTestMb.toLong() * 1024L * 1024L * roots.size)
+        var startIndex = (resume?.fileIndex ?: 0).coerceIn(0, files.size)
+        // If resuming, the checkpoint was saved BEFORE reading startIndex; a reboot/crash may have
+        // occurred on that file. Skip it to avoid a reboot loop and record it.
+        if (resume != null && startIndex < files.size) {
+            val skipped = files[startIndex]
+            badRegions.add(BadRegion(skipped.absolutePath, 0L, skipped.length(), "Skipped on resume: suspected crash/hang while reading this file"))
+            readErrors++
+            bytesScanned += skipped.length().coerceAtLeast(0L)
+            startIndex += 1
+        }
+
+        fun saveCheckpoint(fileIndex: Int, target: String) {
+            onCheckpoint(
+                ScanCheckpoint(
+                    mode = ScanMode.FILE_LEVEL,
+                    target = target,
+                    roots = roots.map { it.absolutePath },
+                    fileIndex = fileIndex,
+                    bytesScanned = bytesScanned,
+                    verifiedBytes = verifiedBytes,
+                    readErrors = readErrors,
+                    writeErrors = writeErrors,
+                    badRegions = badRegions.toList()
+                )
+            )
+        }
 
         fun emit(state: ScanState, target: String, msg: String) {
             val elapsed = max(1L, System.currentTimeMillis() - start)
-            val speed = bytesScanned * 1000L / elapsed
+            val speed = (bytesScanned - (resume?.bytesScanned ?: 0L)).coerceAtLeast(0L) * 1000L / elapsed
             onProgress(
                 ScanProgress(
                     state = state,
@@ -57,11 +86,14 @@ class StorageScanner {
         }
 
         try {
-            emit(ScanState.SCANNING, "", "Enumerating accessible files...")
+            emit(ScanState.SCANNING, "", if (resume != null) "Resuming scan from file $startIndex/${files.size}..." else "Enumerating accessible files...")
 
-            for (file in files) {
+            for (i in startIndex until files.size) {
                 coroutineContext.ensureActive()
-                emit(ScanState.SCANNING, file.absolutePath, "Reading: ${file.name}")
+                val file = files[i]
+                // Checkpoint BEFORE reading each file so we can resume if a bad read crashes/reboots the device
+                saveCheckpoint(i, file.absolutePath)
+                emit(ScanState.SCANNING, file.absolutePath, "Reading (${i + 1}/${files.size}): ${file.name}")
                 val result = scanFileRead(file)
                 bytesScanned += result.bytesRead
                 if (result.error != null) {
@@ -75,18 +107,22 @@ class StorageScanner {
                         )
                     )
                 }
+                if (i % 10 == 0) saveCheckpoint(i + 1, file.absolutePath)
             }
 
-            for (root in roots) {
-                coroutineContext.ensureActive()
-                val testDir = resolveWritableDir(root) ?: continue
-                emit(ScanState.SCANNING, testDir.absolutePath, "Bit-pattern test in ${testDir.absolutePath}")
-                val patternResult = runPatternTest(testDir, patternTestMb)
-                bytesScanned += patternResult.bytesScanned
-                verifiedBytes += patternResult.verifiedBytes
-                readErrors += patternResult.readErrors
-                writeErrors += patternResult.writeErrors
-                badRegions.addAll(patternResult.badRegions)
+            // Pattern test only on fresh scan (not resume mid-pattern) to keep it simple/safe
+            if (resume == null) {
+                for (root in roots) {
+                    coroutineContext.ensureActive()
+                    val testDir = resolveWritableDir(root) ?: continue
+                    emit(ScanState.SCANNING, testDir.absolutePath, "Bit-pattern test in ${testDir.absolutePath}")
+                    val patternResult = runPatternTest(testDir, patternTestMb)
+                    bytesScanned += patternResult.bytesScanned
+                    verifiedBytes += patternResult.verifiedBytes
+                    readErrors += patternResult.readErrors
+                    writeErrors += patternResult.writeErrors
+                    badRegions.addAll(patternResult.badRegions)
+                }
             }
 
             val finalState = ScanState.COMPLETED
@@ -105,10 +141,11 @@ class StorageScanner {
                 readErrors = readErrors,
                 writeErrors = writeErrors,
                 verifiedBytes = verifiedBytes,
-                speedBytesPerSec = bytesScanned * 1000L / max(1L, System.currentTimeMillis() - start)
+                speedBytesPerSec = (bytesScanned - (resume?.bytesScanned ?: 0L)).coerceAtLeast(0L) * 1000L / max(1L, System.currentTimeMillis() - start)
             )
         } catch (ce: kotlinx.coroutines.CancellationException) {
-            val msg = "Scan cancelled."
+            saveCheckpoint(files.size.coerceAtMost((resume?.fileIndex ?: 0)), "")
+            val msg = "Scan cancelled. Progress saved for resume."
             emit(ScanState.CANCELLED, "", msg)
             ScanProgress(
                 state = ScanState.CANCELLED,
@@ -123,7 +160,7 @@ class StorageScanner {
                 verifiedBytes = verifiedBytes
             )
         } catch (t: Throwable) {
-            val msg = "Scan failed: ${t.message}"
+            val msg = "Scan failed: ${t.message}. Progress saved for resume."
             emit(ScanState.FAILED, "", msg)
             ScanProgress(
                 state = ScanState.FAILED,
@@ -206,7 +243,6 @@ class StorageScanner {
                 }
                 raf.fd.sync()
 
-                // Read back and verify bit-by-bit
                 offset = 0L
                 patternIdx = 0
                 val readBuf = ByteArray(patternBlockSize)
@@ -223,7 +259,6 @@ class StorageScanner {
                             readTotal += n
                         }
                         bytesScanned += readTotal
-                        // Bit-by-bit comparison
                         var mismatchStart = -1
                         var blockHasMismatch = false
                         for (i in 0 until readTotal) {
@@ -273,7 +308,6 @@ class StorageScanner {
                     f.listFiles()?.forEach { child ->
                         val name = child.name
                         if (name == "." || name == "..") return@forEach
-                        // Skip the test file and common virtual dirs
                         if (name.startsWith(".s7health_")) return@forEach
                         stack.add(child)
                     }

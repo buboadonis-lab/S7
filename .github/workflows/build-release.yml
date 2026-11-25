@@ -48,7 +48,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="v1.0.0"
+          TAG="v1.0.1"
           {
             echo "Initial release of S7 Health Scanner."
             echo ""
@@ -70,6 +70,6 @@ jobs:
           else
             gh release create "$TAG" dist/s7-health-scanner.apk \
               --target "${{ github.sha }}" \
-              --title "v1.0.0 - S7 Health Scanner" \
+              --title "v1.0.1 - S7 Health Scanner" \
               --notes-file /tmp/release-notes.md
           fi

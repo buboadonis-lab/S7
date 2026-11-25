@@ -23,6 +23,9 @@ An Android app for scanning storage health on Samsung Galaxy S7 Edge (and other 
 - **Report export**
   - Exports a text report with device info, scan stats, and bad regions.
 
+- **Crash/reboot resume**
+  - Scan progress is checkpointed before each file/chunk. If the device restarts (for example when hitting a bad sector), the app offers to resume on next launch and skips the suspected problem chunk to avoid a reboot loop.
+
 ## Important limitations
 
 Android's security model prevents normal apps from performing true physical sector-by-sector scans of internal flash memory:
