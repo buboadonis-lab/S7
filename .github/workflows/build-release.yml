@@ -49,6 +49,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="v1.0.0"
+          {
+            echo "Initial release of S7 Health Scanner."
+            echo ""
+            echo "## What's included"
+            echo "- Android APK: \`s7-health-scanner.apk\`"
+            echo "- File-level storage scan with bit-by-bit pattern verification"
+            echo "- Root-based raw block scan (read-only, via su/dd)"
+            echo "- Damaged file quarantine (moves unreadable files to app-private storage)"
+            echo "- Scan report export"
+            echo ""
+            echo "## Notes"
+            echo "- Without root, Android apps cannot perform true physical sector scans. The app performs file-level reads and bit-pattern verification on accessible storage."
+            echo "- Raw block scan requires root and performs read-only block reads."
+            echo "- Physical bad-sector remapping cannot be performed by an unprivileged Android app."
+          } > /tmp/release-notes.md
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG already exists, uploading asset..."
             gh release upload "$TAG" dist/s7-health-scanner.apk --clobber
@@ -56,17 +71,5 @@ jobs:
             gh release create "$TAG" dist/s7-health-scanner.apk \
               --target "${{ github.sha }}" \
               --title "v1.0.0 - S7 Health Scanner" \
-              --notes "Initial release of S7 Health Scanner.
-
-## What's included
-- Android APK: \`s7-health-scanner.apk\`
-- File-level storage scan with bit-by-bit pattern verification
-- Root-based raw block scan (read-only, via su/dd)
-- Damaged file quarantine (moves unreadable files to app-private storage)
-- Scan report export
-
-## Notes
-- Without root, Android apps cannot perform true physical sector scans. The app performs file-level reads and bit-pattern verification on accessible storage.
-- Raw block scan requires root and performs read-only block reads.
-- Physical bad-sector remapping cannot be performed by an unprivileged Android app."
+              --notes-file /tmp/release-notes.md
           fi
