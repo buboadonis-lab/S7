@@ -169,6 +169,14 @@
                 android:text="@string/apply_badblocks" />
         </LinearLayout>
 
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnViewBadSegments"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="@string/view_bad_segments" />
+
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

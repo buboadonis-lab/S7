@@ -65,6 +65,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnExport.setOnClickListener { exportReport() }
         binding.btnExportBadBlocks.setOnClickListener { exportBadBlocksMap() }
         binding.btnApplyBadBlocks.setOnClickListener { applyBadBlocksFlow() }
+        binding.btnViewBadSegments.setOnClickListener { viewBadSegments() }
 
         checkpointStore = CheckpointStore(this)
         sectorMapStore = SectorMapStore(this)
@@ -416,6 +417,56 @@ class MainActivity : AppCompatActivity() {
 
     private fun appendLogUi(msg: String) {
         runOnUiThread { appendLog(msg) }
+    }
+
+    private fun viewBadSegments() {
+        val summary = sectorMapStore.summary()
+        val sb = StringBuilder()
+        sb.appendLine("Policy: UNVERIFIED=UNHEALTHY by default. BAD_PERMANENT sectors are never rescanned.")
+        sb.appendLine()
+        var totalBad = 0L
+        var totalHealthy = 0L
+        if (summary.isEmpty()) {
+            sb.appendLine("No sector map data yet. Run a scan to build the map.")
+        } else {
+            summary.forEach { (target, counts) ->
+                sb.appendLine("Target: $target")
+                counts.forEach { (status, bytes) ->
+                    sb.appendLine("  $status: ${RawBlockScanner.formatBytes(bytes)}")
+                    if (status == com.buboadonis.s7health.util.SectorStatus.BAD_PERMANENT) totalBad += bytes
+                    if (status == com.buboadonis.s7health.util.SectorStatus.HEALTHY) totalHealthy += bytes
+                }
+                val bads = sectorMapStore.badRanges(target)
+                bads.take(50).forEach { r ->
+                    sb.appendLine("  - BAD [offset=${r.offset}, len=${r.length}]")
+                }
+                if (bads.size > 50) sb.appendLine("  ... ${bads.size - 50} more")
+                sb.appendLine()
+            }
+        }
+        sb.appendLine("Last scan bad regions: ${lastProgress.badRegions.size}")
+        lastProgress.badRegions.take(30).forEach { r ->
+            sb.appendLine("- ${r.pathOrDevice} @${r.offsetBytes}+${r.lengthBytes} ${r.description}")
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Problematic segments")
+            .setMessage(sb.toString().take(4000))
+            .setPositiveButton("OK", null)
+            .setNeutralButton("Mark scan bad as permanent") { _, _ -> markScanBadAsPermanent() }
+            .show()
+    }
+
+    private fun markScanBadAsPermanent() {
+        val bads = lastProgress.badRegions.filter { it.lengthBytes > 0 }
+        if (bads.isEmpty()) { toast("No bad regions with known size to mark."); return }
+        var marked = 0
+        bads.forEach { r ->
+            sectorMapStore.mark(r.pathOrDevice, r.offsetBytes, r.lengthBytes, com.buboadonis.s7health.util.SectorStatus.BAD_PERMANENT)
+            marked++
+        }
+        sectorMapStore.save()
+        appendLog("Marked $marked bad region(s) as PERMANENTLY UNUSABLE in sector map. They will not be rescanned.")
+        toast("Marked $marked region(s) as permanently unusable.")
     }
 
     private fun exportBadBlocksMap() {
