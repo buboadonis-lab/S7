@@ -148,6 +148,7 @@ esac
             val safeName = targetDevice.replace("/", "_").trim('_')
             val out = File(dir, "service.d_s7health_${safeName}.sh")
             val fs = detectFsType(targetDevice).lowercase().ifBlank { "ext4" }
+            val ds = '$'
             out.writeText("""#!/system/bin/sh
 # S7 Health Scanner - Magisk service.d script (exported)
 # Target: $targetDevice  FS: $fs
@@ -157,20 +158,20 @@ TARGET="$targetDevice"
 FS="$fs"
 LOG="/data/local/tmp/s7health_badblocks.log"
 
-echo "$(date): s7health boot script start" >> "$LOG"
-if grep -q " $TARGET " /proc/mounts; then
-  echo "$(date): SKIP $TARGET is mounted" >> "$LOG"
+echo "${ds}(date): s7health boot script start" >> "${ds}LOG"
+if grep -q " ${ds}TARGET " /proc/mounts; then
+  echo "${ds}(date): SKIP ${ds}TARGET is mounted" >> "${ds}LOG"
   exit 0
 fi
-case "$FS" in
+case "${ds}FS" in
   ext2|ext3|ext4)
-    e2fsck -f -y -l "$BADBLOCKS" "$TARGET" >> "$LOG" 2>&1
+    e2fsck -f -y -l "${ds}BADBLOCKS" "${ds}TARGET" >> "${ds}LOG" 2>&1
     ;;
   *)
-    echo "$(date): unsupported fs $FS" >> "$LOG"
+    echo "${ds}(date): unsupported fs ${ds}FS" >> "${ds}LOG"
     ;;
 esac
-echo "$(date): done" >> "$LOG"
+echo "${ds}(date): done" >> "${ds}LOG"
 """)
             out
         } catch (_: Throwable) { null }
