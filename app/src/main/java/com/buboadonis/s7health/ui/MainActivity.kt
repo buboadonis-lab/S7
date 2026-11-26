@@ -114,6 +114,21 @@ class MainActivity : AppCompatActivity() {
             toast("A scan is already running.")
             return
         }
+        val cp = checkpointStore.load()
+        if (cp != null && cp.mode == ScanMode.FILE_LEVEL) {
+            AlertDialog.Builder(this)
+                .setTitle("Resume previous scan?")
+                .setMessage("A saved file-level checkpoint was found (${RawBlockScanner.formatBytes(cp.bytesScanned)} scanned, ${cp.badRegions.size} issues). Resume to avoid restarting from zero?")
+                .setPositiveButton("Resume") { _, _ -> resumeScan(cp) }
+                .setNegativeButton("Start fresh") { _, _ -> checkpointStore.clear(); startStorageScanAfterPermission() }
+                .setNeutralButton("Cancel", null)
+                .show()
+            return
+        }
+        startStorageScanAfterPermission()
+    }
+
+    private fun startStorageScanAfterPermission() {
         if (Build.VERSION.SDK_INT >= 30 && !Environment.isExternalStorageManager()) {
             AlertDialog.Builder(this)
                 .setTitle("Storage permission")
@@ -161,6 +176,21 @@ class MainActivity : AppCompatActivity() {
             toast("A scan is already running.")
             return
         }
+        val cp = checkpointStore.load()
+        if (cp != null && cp.mode == ScanMode.RAW_BLOCK) {
+            AlertDialog.Builder(this)
+                .setTitle("Resume previous raw scan?")
+                .setMessage("A saved raw scan checkpoint was found for ${cp.target} at offset ${cp.rawOffsetBytes} (${RawBlockScanner.formatBytes(cp.bytesScanned)} scanned). Resume to avoid restarting from zero?")
+                .setPositiveButton("Resume") { _, _ -> resumeScan(cp) }
+                .setNegativeButton("Start fresh") { _, _ -> checkpointStore.clear(); startRawScanFlowFresh() }
+                .setNeutralButton("Cancel", null)
+                .show()
+            return
+        }
+        startRawScanFlowFresh()
+    }
+
+    private fun startRawScanFlowFresh() {
         appendLog("Checking root access...")
         lifecycleScope.launch {
             val rootAvailable = withContext(Dispatchers.IO) { rawScanner.isRootAvailable() }

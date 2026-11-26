@@ -58,7 +58,16 @@ class SectorMapStore(context: Context) {
                 targets.put(k, arr)
             }
             root.put("targets", targets)
-            file.writeText(root.toString())
+            val tmp = File(file.parentFile, file.name + ".tmp")
+            java.io.FileOutputStream(tmp).use { fos ->
+                fos.write(root.toString().toByteArray(Charsets.UTF_8))
+                fos.flush()
+                fos.fd.sync()
+            }
+            if (!tmp.renameTo(file)) {
+                file.writeText(root.toString())
+                tmp.delete()
+            }
         } catch (_: Throwable) {}
     }
 

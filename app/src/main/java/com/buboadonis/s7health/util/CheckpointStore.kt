@@ -51,7 +51,16 @@ class CheckpointStore(context: Context) {
                 badArr.put(o)
             }
             json.put("badRegions", badArr)
-            file.writeText(json.toString())
+            val tmp = File(file.parentFile, file.name + ".tmp")
+            java.io.FileOutputStream(tmp).use { fos ->
+                fos.write(json.toString().toByteArray(Charsets.UTF_8))
+                fos.flush()
+                fos.fd.sync()
+            }
+            if (!tmp.renameTo(file)) {
+                file.writeText(json.toString())
+                tmp.delete()
+            }
         } catch (_: Throwable) { }
     }
 
