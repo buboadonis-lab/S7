@@ -7,5 +7,5 @@
     <string name="export_report">Export Report</string>
     <string name="health_unknown">Health: Unknown</string>
     <string name="status_idle">Ready. Select a scan mode.</string>
-    <string name="disclaimer">Note: Without root access, Android apps cannot perform raw sector-by-sector scans of physical flash memory. File-level scans verify accessible storage by reading files and writing/verifying test patterns. Raw block scanning and bad-block remapping require root and device support.</string>
+    <string name="disclaimer">Policy: All sectors/bits are treated as UNHEALTHY unless verified healthy by a completed scan. If the phone powers off/restarts during a scan, the in-progress sector/bit is marked PERMANENTLY UNUSABLE and is never rescanned. The app keeps a persistent healthy/bad sector map. Manual scan control only. Note: Android apps cannot force other apps to use specific physical sectors; OS/filesystem-level enforcement requires root/system support. Raw block scans require root.</string>
 </resources>

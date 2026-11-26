@@ -24,6 +24,7 @@ import com.buboadonis.s7health.scanner.RawBlockScanner
 import com.buboadonis.s7health.scanner.StorageScanner
 import com.buboadonis.s7health.util.CheckpointStore
 import com.buboadonis.s7health.util.ScanCheckpoint
+import com.buboadonis.s7health.util.SectorMapStore
 import com.buboadonis.s7health.model.ScanMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -40,6 +41,7 @@ class MainActivity : AppCompatActivity() {
     private val storageScanner = StorageScanner()
     private val rawScanner = RawBlockScanner()
     private lateinit var checkpointStore: CheckpointStore
+    private lateinit var sectorMapStore: SectorMapStore
     private var scanJob: Job? = null
     private var lastProgress: ScanProgress = ScanProgress()
     private val logLines = ArrayDeque<String>()
@@ -61,6 +63,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnExport.setOnClickListener { exportReport() }
 
         checkpointStore = CheckpointStore(this)
+        sectorMapStore = SectorMapStore(this)
         updateUi(lastProgress)
         ensurePermissions()
         appendLog("S7 Health Scanner ready. Target device: Samsung Galaxy S7 Edge (or any Android device).")
@@ -199,6 +202,7 @@ class MainActivity : AppCompatActivity() {
             val result = rawScanner.scanBlockDevice(
                 device = device,
                 resume = resume,
+                sectorMap = sectorMapStore,
                 onCheckpoint = { checkpointStore.save(it) }
             ) { progress ->
                 runOnUiThread { updateUi(progress) }
@@ -339,10 +343,22 @@ class MainActivity : AppCompatActivity() {
             }
         }
         sb.appendLine()
+        sb.appendLine("Persistent sector map (policy: UNHEALTHY unless verified healthy; crash/power-off => PERMANENTLY UNUSABLE, never rescanned):")
+        val summary = sectorMapStore.summary()
+        if (summary.isEmpty()) {
+            sb.appendLine("  No sector map entries yet.")
+        } else {
+            summary.forEach { (target, counts) ->
+                sb.appendLine("  Target: $target")
+                counts.forEach { (status, bytes) -> sb.appendLine("    $status: $bytes bytes") }
+            }
+        }
+        sb.appendLine()
         sb.appendLine("Notes:")
         sb.appendLine("- File-level scans read accessible files and perform bit-pattern write/read verification on accessible storage.")
         sb.appendLine("- Raw block scans require root and read blocks via su/dd. This app does not write to raw block devices.")
         sb.appendLine("- Physical bad-sector remapping is handled by flash storage controller/firmware; software cannot reliably repair it.")
+        sb.appendLine("- Android apps cannot force other apps to use specific physical sectors; OS/filesystem-level enforcement requires root/system support.")
         return sb.toString()
     }
 
@@ -358,13 +374,23 @@ class MainActivity : AppCompatActivity() {
             HealthStatus.UNKNOWN -> R.color.md_theme_secondary
         }
         binding.healthText.setTextColor(ContextCompat.getColor(this, colorRes))
+        val mapSummary = sectorMapStore.summary()
+        var healthyBytes = 0L
+        var badPermBytes = 0L
+        mapSummary.values.forEach { m ->
+            healthyBytes += m[com.buboadonis.s7health.util.SectorStatus.HEALTHY] ?: 0L
+            badPermBytes += m[com.buboadonis.s7health.util.SectorStatus.BAD_PERMANENT] ?: 0L
+        }
         binding.statsText.text =
             "Scanned: ${RawBlockScanner.formatBytes(p.bytesScanned)}\n" +
             "Verified: ${RawBlockScanner.formatBytes(p.verifiedBytes)}\n" +
             "Read errors: ${p.readErrors}\n" +
             "Write errors: ${p.writeErrors}\n" +
             "Bad regions: ${p.badRegions.size}\n" +
-            "Speed: ${RawBlockScanner.formatBytes(p.speedBytesPerSec)}/s"
+            "Speed: ${RawBlockScanner.formatBytes(p.speedBytesPerSec)}/s\n" +
+            "Map healthy: ${RawBlockScanner.formatBytes(healthyBytes)}\n" +
+            "Map bad-perm: ${RawBlockScanner.formatBytes(badPermBytes)}\n" +
+            "Unverified: UNHEALTHY by policy"
 
         val running = p.state == ScanState.SCANNING || p.state == ScanState.REPAIRING
         binding.btnScanStorage.isEnabled = !running

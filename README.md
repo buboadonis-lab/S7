@@ -4,6 +4,10 @@ An Android app for scanning storage health on Samsung Galaxy S7 Edge (and other 
 
 ## Features
 
+- **Manual scan control** - scans run only when the user starts them.
+- **Persistent sector/health map** - stores verified healthy and permanently bad regions. **By default all sectors/bits are treated as UNHEALTHY unless verified healthy.**
+- **Crash/power-off policy** - if the phone powers off/restarts during scan, the in-progress sector/chunk is marked **PERMANENTLY UNUSABLE** and is never rescanned.
+- **Boot guard** - registers a boot receiver and posts a notification on boot so the health guard is visible early after startup. (Android does not allow a normal app to run strictly before all system apps.)
 - **Accessible storage scan (no root required)**
   - Enumerates readable files in accessible storage areas.
   - Reads file contents in chunks and reports read I/O errors.
@@ -28,11 +32,12 @@ An Android app for scanning storage health on Samsung Galaxy S7 Edge (and other 
 
 ## Important limitations
 
-Android's security model prevents normal apps from performing true physical sector-by-sector scans of internal flash memory:
+Android's security model prevents normal apps from performing true physical sector-by-sector scans of internal flash memory or forcing other apps to use specific physical sectors:
 
 - **Without root:** apps cannot read raw block devices (`/dev/block/*`). This app scans accessible files and performs bit-pattern verification on files it creates in accessible storage. This verifies storage behavior at the filesystem/file level, not physical controller sectors.
 - **With root:** the app can perform read-only block reads using `su` + `dd`. This is closer to a sector/block scan, but it still operates through the OS/block layer; flash controllers may remap bad sectors transparently.
 - **Repair:** physical NAND/eMMC/UFS bad sectors cannot be truly "repaired" by userspace software. The appropriate response is usually controller remapping, filesystem repair, or storage replacement. This app quarantines damaged accessible files and reports raw bad regions; it does not write to raw block devices.
+- **"Use only healthy sectors for everyone":** a normal Android app cannot enforce physical sector allocation for other apps. The app enforces this policy in its own persistent map (unverified=unhealthy, crash during scan=permanently unusable, never rescanned) and reports/quarantines where possible. OS/filesystem-level enforcement requires root and filesystem/block-layer tooling on unmounted volumes, or kernel/ROM support.
 
 ## Build
 

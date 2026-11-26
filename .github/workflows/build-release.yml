@@ -48,19 +48,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="v1.0.1"
+          TAG="v1.0.2"
           {
-            echo "Initial release of S7 Health Scanner."
+            echo "S7 Health Scanner v1.0.2"
             echo ""
             echo "## What's included"
             echo "- Android APK: \`s7-health-scanner.apk\`"
-            echo "- File-level storage scan with bit-by-bit pattern verification"
+            echo "- Manual-only storage scan control"
+            echo "- Persistent healthy/bad sector map: unverified sectors treated as UNHEALTHY by default"
+            echo "- Crash/power-off during scan marks in-progress sector/chunk as PERMANENTLY UNUSABLE (never rescanned)"
+            echo "- Boot receiver notification (health guard starts on boot)"
+            echo "- File-level scan with bit-by-bit pattern verification"
             echo "- Root-based raw block scan (read-only, via su/dd)"
-            echo "- Damaged file quarantine (moves unreadable files to app-private storage)"
-            echo "- Scan report export"
+            echo "- Damaged file quarantine and scan report export"
             echo ""
             echo "## Notes"
-            echo "- Without root, Android apps cannot perform true physical sector scans. The app performs file-level reads and bit-pattern verification on accessible storage."
+            echo "- Android apps cannot force other apps to use specific physical sectors; OS/filesystem-level enforcement requires root/system support."
             echo "- Raw block scan requires root and performs read-only block reads."
             echo "- Physical bad-sector remapping cannot be performed by an unprivileged Android app."
           } > /tmp/release-notes.md
@@ -70,6 +73,6 @@ jobs:
           else
             gh release create "$TAG" dist/s7-health-scanner.apk \
               --target "${{ github.sha }}" \
-              --title "v1.0.1 - S7 Health Scanner" \
+              --title "v1.0.2 - S7 Health Scanner" \
               --notes-file /tmp/release-notes.md
           fi

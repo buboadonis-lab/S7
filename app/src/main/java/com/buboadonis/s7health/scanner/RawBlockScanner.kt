@@ -6,6 +6,8 @@ import com.buboadonis.s7health.model.ScanMode
 import com.buboadonis.s7health.model.ScanProgress
 import com.buboadonis.s7health.model.ScanState
 import com.buboadonis.s7health.util.ScanCheckpoint
+import com.buboadonis.s7health.util.SectorMapStore
+import com.buboadonis.s7health.util.SectorStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
@@ -72,6 +74,7 @@ class RawBlockScanner {
         device: BlockDevice,
         maxBytes: Long = device.sizeBytes.takeIf { it > 0 } ?: (256L * 1024 * 1024),
         resume: ScanCheckpoint? = null,
+        sectorMap: com.buboadonis.s7health.util.SectorMapStore? = null,
         onCheckpoint: (ScanCheckpoint) -> Unit = {},
         onProgress: (ScanProgress) -> Unit
     ): ScanProgress = withContext(Dispatchers.IO) {
@@ -86,9 +89,11 @@ class RawBlockScanner {
         // If resuming, checkpoint was saved BEFORE reading offset; skip that chunk to avoid a reboot loop.
         if (resume != null && offset < total) {
             val skipCount = minOf(chunkSize, total - offset)
-            badRegions.add(BadRegion(device.path, offset, skipCount, "Skipped on resume: suspected crash/hang/reboot while reading this block"))
+            badRegions.add(BadRegion(device.path, offset, skipCount, "Skipped on resume: suspected crash/hang/reboot while reading this block - marked PERMANENTLY UNUSABLE"))
             readErrors++
             bytesScanned += skipCount
+            sectorMap?.mark(device.path, offset, skipCount, SectorStatus.BAD_PERMANENT)
+            sectorMap?.save()
             offset += skipCount
         }
 
@@ -130,6 +135,18 @@ class RawBlockScanner {
             while (offset < total) {
                 coroutineContext.ensureActive()
                 val count = minOf(chunkSize, total - offset)
+
+                // Never rescan sectors marked permanently bad (policy: crash/power-off during scan => permanently unusable)
+                if (sectorMap?.isBadPermanent(device.path, offset, count) == true) {
+                    bytesScanned += count
+                    offset += count
+                    if (offset % (16L * chunkSize) == 0L) {
+                        saveCheckpoint()
+                        emit(ScanState.SCANNING, "Skipping permanently bad region, scanned ${formatBytes(bytesScanned)} / ${formatBytes(total)}")
+                    }
+                    continue
+                }
+
                 // Checkpoint BEFORE reading so a device reboot on a bad sector allows resume at next chunk
                 saveCheckpoint()
 
@@ -149,13 +166,19 @@ class RawBlockScanner {
                             description = "Raw read error at offset $offset (${count} bytes): ${r.stdout.lineSequence().firstOrNull { !it.startsWith("__EXIT:") && it.isNotBlank() } ?: "I/O error"}"
                         )
                     )
+                    sectorMap?.mark(device.path, offset, count, SectorStatus.BAD_PERMANENT)
+                    sectorMap?.save()
+                } else {
+                    sectorMap?.mark(device.path, offset, count, SectorStatus.HEALTHY)
                 }
                 offset += count
                 if (offset % (16L * chunkSize) == 0L || !exitOk) {
+                    sectorMap?.save()
                     saveCheckpoint()
                     emit(ScanState.SCANNING, "Scanned ${formatBytes(bytesScanned)} / ${formatBytes(total)}" + if (readErrors > 0) " ($readErrors errors)" else "")
                 }
             }
+            sectorMap?.save()
             saveCheckpoint()
             val msg = "Raw scan complete. ${badRegions.size} bad region(s) found."
             emit(ScanState.COMPLETED, msg)
