@@ -48,16 +48,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="v1.0.2"
+          TAG="v1.0.3"
           {
-            echo "S7 Health Scanner v1.0.2"
+            echo "S7 Health Scanner v1.0.3"
             echo ""
             echo "## What's included"
             echo "- Android APK: \`s7-health-scanner.apk\`"
             echo "- Manual-only storage scan control"
             echo "- Persistent healthy/bad sector map: unverified sectors treated as UNHEALTHY by default"
             echo "- Crash/power-off during scan marks in-progress sector/chunk as PERMANENTLY UNUSABLE (never rescanned)"
-            echo "- Boot receiver notification (health guard starts on boot)"
+            echo "- Boot receiver notification (health guard starts on boot)
+            echo "- Memory card manager: export badblocks map, root-only tagging via e2fsck -l on UNMOUNTED ext2/3/4 partitions""
             echo "- File-level scan with bit-by-bit pattern verification"
             echo "- Root-based raw block scan (read-only, via su/dd)"
             echo "- Damaged file quarantine and scan report export"
@@ -73,6 +74,6 @@ jobs:
           else
             gh release create "$TAG" dist/s7-health-scanner.apk \
               --target "${{ github.sha }}" \
-              --title "v1.0.2 - S7 Health Scanner" \
+              --title "v1.0.3 - S7 Health Scanner" \
               --notes-file /tmp/release-notes.md
           fi

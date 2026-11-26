@@ -25,6 +25,7 @@ import com.buboadonis.s7health.scanner.StorageScanner
 import com.buboadonis.s7health.util.CheckpointStore
 import com.buboadonis.s7health.util.ScanCheckpoint
 import com.buboadonis.s7health.util.SectorMapStore
+import com.buboadonis.s7health.util.RootRepairManager
 import com.buboadonis.s7health.model.ScanMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -42,6 +43,7 @@ class MainActivity : AppCompatActivity() {
     private val rawScanner = RawBlockScanner()
     private lateinit var checkpointStore: CheckpointStore
     private lateinit var sectorMapStore: SectorMapStore
+    private lateinit var repairManager: RootRepairManager
     private var scanJob: Job? = null
     private var lastProgress: ScanProgress = ScanProgress()
     private val logLines = ArrayDeque<String>()
@@ -61,9 +63,12 @@ class MainActivity : AppCompatActivity() {
         binding.btnStop.setOnClickListener { stopScan() }
         binding.btnRepair.setOnClickListener { repairOrMark() }
         binding.btnExport.setOnClickListener { exportReport() }
+        binding.btnExportBadBlocks.setOnClickListener { exportBadBlocksMap() }
+        binding.btnApplyBadBlocks.setOnClickListener { applyBadBlocksFlow() }
 
         checkpointStore = CheckpointStore(this)
         sectorMapStore = SectorMapStore(this)
+        repairManager = RootRepairManager(this)
         updateUi(lastProgress)
         ensurePermissions()
         appendLog("S7 Health Scanner ready. Target device: Samsung Galaxy S7 Edge (or any Android device).")
@@ -411,6 +416,105 @@ class MainActivity : AppCompatActivity() {
 
     private fun appendLogUi(msg: String) {
         runOnUiThread { appendLog(msg) }
+    }
+
+    private fun exportBadBlocksMap() {
+        val targets = sectorMapStore.summary().keys.toList()
+        if (targets.isEmpty()) {
+            toast("No sector map data yet. Run a scan first.")
+            return
+        }
+        val labels = targets.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Export bad blocks map")
+            .setItems(labels) { _, which ->
+                val target = targets[which]
+                val file = repairManager.exportBadBlocksFile(target)
+                if (file != null) {
+                    appendLog("Bad blocks map exported: ${file.absolutePath}")
+                    AlertDialog.Builder(this)
+                        .setTitle("Bad blocks exported")
+                        .setMessage("Target: $target\nFile: ${file.absolutePath}\n\nThis file can be used with e2fsck -l on an UNMOUNTED ext2/3/4 partition (root required).")
+                        .setPositiveButton("OK", null)
+                        .show()
+                } else {
+                    toast("Export failed.")
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun applyBadBlocksFlow() {
+        lifecycleScope.launch {
+            val rootOk = withContext(Dispatchers.IO) { repairManager.isRootAvailable() }
+            if (!rootOk) {
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Root required")
+                    .setMessage("Tagging bad sectors at filesystem/block level requires root (su). Without root, the app can only keep its own sector map and quarantine accessible files.")
+                    .setPositiveButton("OK", null)
+                    .show()
+                return@launch
+            }
+            val targets = sectorMapStore.summary().keys.toList()
+            if (targets.isEmpty()) { toast("No sector map data. Run a scan first."); return@launch }
+            val labels = targets.toTypedArray()
+            AlertDialog.Builder(this@MainActivity)
+                .setTitle("Select target to tag")
+                .setItems(labels) { _, which -> confirmApplyBadBlocks(targets[which]) }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+    }
+
+    private fun confirmApplyBadBlocks(target: String) {
+        lifecycleScope.launch {
+            val info = withContext(Dispatchers.IO) {
+                val mounted = repairManager.isMounted(target)
+                val fs = repairManager.detectFsType(target)
+                val mountInfo = repairManager.getMountInfo(target)
+                Triple(mounted, fs, mountInfo)
+            }
+            val (mounted, fs, mountInfo) = info
+            val badFile = repairManager.exportBadBlocksFile(target)
+            if (badFile == null) { toast("Failed to export bad blocks file."); return@launch }
+            val msg = buildString {
+                append("Target: $target\nFS: $fs\nMounted: $mounted\n")
+                if (mountInfo.isNotBlank()) append("Mount: $mountInfo\n")
+                append("\nBad blocks file: ${badFile.absolutePath}\n\n")
+                append("WARNING: This attempts to tag bad blocks so the filesystem/OS avoids them. ")
+                append("It is only safe on an UNMOUNTED partition. Do NOT run on mounted system/data partitions. ")
+                append("ext2/3/4: uses e2fsck -f -y -l. F2FS/others: limited/unsupported. ")
+                append("Physical flash remapping is controller-controlled; this is best-effort filesystem tagging.\n\n")
+                append("Proceed only if you understand the risk.")
+            }
+            AlertDialog.Builder(this@MainActivity)
+                .setTitle("Tag bad sectors (root)")
+                .setMessage(msg)
+                .setPositiveButton(if (mounted) "Mounted - cannot apply" else "Apply") { _, _ ->
+                    if (mounted) {
+                        toast("Device is mounted; unmount first.")
+                    } else {
+                        runApplyBadBlocks(target, badFile)
+                    }
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+    }
+
+    private fun runApplyBadBlocks(target: String, badFile: File) {
+        appendLog("Applying bad blocks to $target using ${badFile.name} ...")
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) { repairManager.applyBadBlocks(target, badFile) }
+            appendLog(result.message)
+            if (result.output.isNotBlank()) appendLog(result.output.take(2000))
+            AlertDialog.Builder(this@MainActivity)
+                .setTitle(if (result.ok) "Tagging complete" else "Tagging failed / unsupported")
+                .setMessage(result.message + if (result.output.isNotBlank()) "\n\n" + result.output.take(1500) else "")
+                .setPositiveButton("OK", null)
+                .show()
+        }
     }
 
     private fun checkForResume() {
