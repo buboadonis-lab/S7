@@ -140,4 +140,49 @@ esac
             out
         } catch (_: Throwable) { null }
     }
+
+    fun exportMagiskBootScript(targetDevice: String, blockSize: Int = 4096): File? {
+        return try {
+            val badFile = exportBadBlocksFile(targetDevice, blockSize) ?: return null
+            val dir = context.getExternalFilesDir(null) ?: context.filesDir
+            val safeName = targetDevice.replace("/", "_").trim('_')
+            val out = File(dir, "service.d_s7health_${safeName}.sh")
+            val fs = detectFsType(targetDevice).lowercase().ifBlank { "ext4" }
+            out.writeText("""#!/system/bin/sh
+# S7 Health Scanner - Magisk service.d script (exported)
+# Target: $targetDevice  FS: $fs
+# SAFETY: Only runs if target is UNMOUNTED. Do NOT use on mounted system/data.
+BADBLOCKS="${badFile.absolutePath}"
+TARGET="$targetDevice"
+FS="$fs"
+LOG="/data/local/tmp/s7health_badblocks.log"
+
+echo "$(date): s7health boot script start" >> "$LOG"
+if grep -q " $TARGET " /proc/mounts; then
+  echo "$(date): SKIP $TARGET is mounted" >> "$LOG"
+  exit 0
+fi
+case "$FS" in
+  ext2|ext3|ext4)
+    e2fsck -f -y -l "$BADBLOCKS" "$TARGET" >> "$LOG" 2>&1
+    ;;
+  *)
+    echo "$(date): unsupported fs $FS" >> "$LOG"
+    ;;
+esac
+echo "$(date): done" >> "$LOG"
+""")
+            out
+        } catch (_: Throwable) { null }
+    }
+
+    fun installMagiskScript(script: File): RepairResult {
+        if (!isRootAvailable()) return RepairResult(false, "Root not available.")
+        val destDir = "/data/adb/service.d"
+        val dest = "$destDir/${script.name}"
+        val cmd = "mkdir -p $destDir && cp '${script.absolutePath}' '$dest' && chmod 755 '$dest' && echo __EXIT:$?"
+        val r = runSu(cmd, timeoutMs = 20_000)
+        val ok = r.stdout.contains("__EXIT:0")
+        return RepairResult(ok, if (ok) "Installed to $dest. It will run at boot via Magisk service.d (only when target is unmounted)." else "Install failed: ${r.stdout.take(500)}", r.stdout)
+    }
 }

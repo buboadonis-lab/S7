@@ -67,10 +67,16 @@ class MainActivity : AppCompatActivity() {
         binding.btnApplyBadBlocks.setOnClickListener { applyBadBlocksFlow() }
         binding.btnViewBadSegments.setOnClickListener { viewBadSegments() }
         binding.btnExportRecoveryScript.setOnClickListener { exportRecoveryScript() }
+        binding.switchPremium.setOnCheckedChangeListener { _, checked -> setPremiumMode(checked) }
+        binding.btnApplyUnmounted.setOnClickListener { applyOnUnmountedFlow() }
+        binding.btnExportMagiskScript.setOnClickListener { exportMagiskBootScript() }
 
         checkpointStore = CheckpointStore(this)
         sectorMapStore = SectorMapStore(this)
         repairManager = RootRepairManager(this)
+        val premium = getSharedPreferences("s7health", MODE_PRIVATE).getBoolean("premium_mode", false)
+        binding.switchPremium.isChecked = premium
+        binding.premiumActions.visibility = if (premium) android.view.View.VISIBLE else android.view.View.GONE
         updateUi(lastProgress)
         ensurePermissions()
         appendLog("S7 Health Scanner ready. Target device: Samsung Galaxy S7 Edge (or any Android device).")
@@ -468,6 +474,62 @@ class MainActivity : AppCompatActivity() {
         sectorMapStore.save()
         appendLog("Marked $marked bad region(s) as PERMANENTLY UNUSABLE in sector map. They will not be rescanned.")
         toast("Marked $marked region(s) as permanently unusable.")
+    }
+
+    private fun setPremiumMode(enabled: Boolean) {
+        getSharedPreferences("s7health", MODE_PRIVATE).edit().putBoolean("premium_mode", enabled).apply()
+        binding.premiumActions.visibility = if (enabled) android.view.View.VISIBLE else android.view.View.GONE
+        appendLog(if (enabled) "Premium Root Mode enabled." else "Premium Root Mode disabled.")
+    }
+
+    private fun applyOnUnmountedFlow() {
+        lifecycleScope.launch {
+            val rootOk = withContext(Dispatchers.IO) { repairManager.isRootAvailable() }
+            if (!rootOk) { toast("Root required."); return@launch }
+            val targets = sectorMapStore.summary().keys.toList()
+            if (targets.isEmpty()) { toast("No sector map data."); return@launch }
+            AlertDialog.Builder(this@MainActivity)
+                .setTitle("Apply on UNMOUNTED target")
+                .setItems(targets.toTypedArray()) { _, which -> confirmApplyBadBlocks(targets[which]) }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+    }
+
+    private fun exportMagiskBootScript() {
+        val targets = sectorMapStore.summary().keys.toList()
+        if (targets.isEmpty()) { toast("No sector map data yet. Run a scan first."); return }
+        AlertDialog.Builder(this)
+            .setTitle("Export Magisk boot script")
+            .setItems(targets.toTypedArray()) { _, which ->
+                val target = targets[which]
+                lifecycleScope.launch {
+                    val file = withContext(Dispatchers.IO) { repairManager.exportMagiskBootScript(target) }
+                    if (file != null) {
+                        appendLog("Magisk boot script exported: ${file.absolutePath}")
+                        AlertDialog.Builder(this@MainActivity)
+                            .setTitle("Magisk boot script exported")
+                            .setMessage("Target: $target\nScript: ${file.absolutePath}\n\nInstall manually to /data/adb/service.d/ (Magisk) and chmod +x. The script only applies when the target is UNMOUNTED. Do NOT use on critical mounted system/data partitions.")
+                            .setPositiveButton("Install via root") { _, _ -> installMagiskScript(file) }
+                            .setNegativeButton("OK", null)
+                            .show()
+                    } else toast("Export failed.")
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun installMagiskScript(script: File) {
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) { repairManager.installMagiskScript(script) }
+            appendLog(result.message)
+            AlertDialog.Builder(this@MainActivity)
+                .setTitle(if (result.ok) "Installed" else "Install failed")
+                .setMessage(result.message)
+                .setPositiveButton("OK", null)
+                .show()
+        }
     }
 
     private fun exportRecoveryScript() {
