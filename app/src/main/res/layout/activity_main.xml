@@ -177,6 +177,13 @@
             android:layout_marginTop="4dp"
             android:text="@string/view_bad_segments" />
 
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnExportRecoveryScript"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/export_recovery_script" />
+
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

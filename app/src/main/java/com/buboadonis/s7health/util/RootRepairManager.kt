@@ -97,4 +97,47 @@ class RootRepairManager(private val context: Context) {
             CmdResult(exit, stdout.toString().ifBlank { err.toString() })
         } catch (t: Throwable) { CmdResult(-1, t.message ?: "error") }
     }
+
+    fun exportRecoveryScript(targetDevice: String, blockSize: Int = 4096): File? {
+        return try {
+            val badFile = exportBadBlocksFile(targetDevice, blockSize) ?: return null
+            val dir = context.getExternalFilesDir(null) ?: context.filesDir
+            val safeName = targetDevice.replace("/", "_").trim('_')
+            val out = File(dir, "apply_badblocks_${safeName}.sh")
+            val fs = detectFsType(targetDevice).lowercase().ifBlank { "ext4" }
+            out.writeText("""#!/system/bin/sh
+# S7 Health Scanner recovery script
+# TARGET=$targetDevice
+# FS=$fs
+# BADBLOCKS=${badFile.absolutePath}
+# IMPORTANT: Run only on an UNMOUNTED partition (recovery/TWRP/adb shell in recovery).
+# Applying on mounted partitions can cause corruption.
+
+echo "Target: $targetDevice"
+echo "Filesystem: $fs"
+echo "Badblocks: ${badFile.absolutePath}"
+
+# Verify unmounted
+if grep -q " $targetDevice " /proc/mounts; then
+  echo "ERROR: $targetDevice is mounted. Unmount before proceeding."
+  exit 1
+fi
+
+case "$fs" in
+  ext2|ext3|ext4)
+    e2fsck -f -y -l "${badFile.absolutePath}" "$targetDevice"
+    ;;
+  f2fs)
+    echo "F2FS does not support ext badblocks list; running fsck.f2fs -a"
+    fsck.f2fs -a "$targetDevice"
+    ;;
+  *)
+    echo "Unsupported fs type: $fs. Badblocks file exported for manual use."
+    exit 2
+    ;;
+esac
+""")
+            out
+        } catch (_: Throwable) { null }
+    }
 }

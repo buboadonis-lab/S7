@@ -66,6 +66,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnExportBadBlocks.setOnClickListener { exportBadBlocksMap() }
         binding.btnApplyBadBlocks.setOnClickListener { applyBadBlocksFlow() }
         binding.btnViewBadSegments.setOnClickListener { viewBadSegments() }
+        binding.btnExportRecoveryScript.setOnClickListener { exportRecoveryScript() }
 
         checkpointStore = CheckpointStore(this)
         sectorMapStore = SectorMapStore(this)
@@ -467,6 +468,29 @@ class MainActivity : AppCompatActivity() {
         sectorMapStore.save()
         appendLog("Marked $marked bad region(s) as PERMANENTLY UNUSABLE in sector map. They will not be rescanned.")
         toast("Marked $marked region(s) as permanently unusable.")
+    }
+
+    private fun exportRecoveryScript() {
+        val targets = sectorMapStore.summary().keys.toList()
+        if (targets.isEmpty()) { toast("No sector map data yet. Run a scan first."); return }
+        AlertDialog.Builder(this)
+            .setTitle("Export recovery script")
+            .setItems(targets.toTypedArray()) { _, which ->
+                val target = targets[which]
+                lifecycleScope.launch {
+                    val file = withContext(Dispatchers.IO) { repairManager.exportRecoveryScript(target) }
+                    if (file != null) {
+                        appendLog("Recovery script exported: ${file.absolutePath}")
+                        AlertDialog.Builder(this@MainActivity)
+                            .setTitle("Recovery script exported")
+                            .setMessage("Target: $target\nScript: ${file.absolutePath}\n\nRun this in recovery/TWRP/adb shell ONLY when the partition is UNMOUNTED. It will apply bad-block tagging (ext2/3/4 via e2fsck -l).")
+                            .setPositiveButton("OK", null)
+                            .show()
+                    } else toast("Export failed.")
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun exportBadBlocksMap() {
