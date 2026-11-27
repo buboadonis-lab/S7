@@ -76,28 +76,14 @@
             android:text="Scanned: 0 B\nVerified: 0 B\nRead errors: 0\nWrite errors: 0\nBad regions: 0\nSpeed: 0 B/s"
             android:textAppearance="@style/TextAppearance.Material3.BodySmall" />
 
-        <LinearLayout
+        <!-- Single smart button: auto-detects best action -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnSmartScan"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
-            android:orientation="horizontal">
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnScanStorage"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="@string/scan_storage" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnScanRaw"
-                style="@style/Widget.Material3.Button.OutlinedButton"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
-                android:layout_weight="1"
-                android:text="@string/scan_raw" />
-        </LinearLayout>
+            android:text="@string/smart_scan"
+            app:cornerRadius="12dp" />
 
         <LinearLayout
             android:layout_width="match_parent"
@@ -114,112 +100,162 @@
                 android:text="@string/stop_scan" />
 
             <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnRepair"
+                android:id="@+id/btnViewResults"
                 style="@style/Widget.Material3.Button.OutlinedButton"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="8dp"
                 android:layout_weight="1"
-                android:text="@string/repair" />
+                android:text="@string/view_results" />
         </LinearLayout>
 
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnExport"
-            style="@style/Widget.Material3.Button.TextButton"
+        <TextView
+            android:id="@+id/batteryHint"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="@string/export_report" />
+            android:layout_marginTop="8dp"
+            android:text="Tip: Allow background activity / disable battery optimization so scanning continues with screen off."
+            android:textAppearance="@style/TextAppearance.Material3.BodySmall"
+            android:visibility="gone" />
 
+        <!-- Advanced section (collapsed by default) -->
         <TextView
+            android:id="@+id/advancedToggle"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
-            android:text="Memory card manager (root)"
-            android:textAppearance="@style/TextAppearance.Material3.TitleMedium" />
-
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="Exports a bad-blocks map from verified bad/permanent sectors. Applying tags requires root and an UNMOUNTED partition; ext2/3/4 uses e2fsck -l. This cannot safely tag sectors on mounted/active system storage."
-            android:textAppearance="@style/TextAppearance.Material3.BodySmall" />
+            android:background="?attr/selectableItemBackground"
+            android:padding="8dp"
+            android:text="Advanced tools ▼"
+            android:textAppearance="@style/TextAppearance.Material3.TitleMedium"
+            android:textColor="?attr/colorPrimary" />
 
         <LinearLayout
+            android:id="@+id/advancedSection"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:orientation="horizontal">
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnExportBadBlocks"
-                style="@style/Widget.Material3.Button.OutlinedButton"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="@string/export_badblocks" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnApplyBadBlocks"
-                style="@style/Widget.Material3.Button.OutlinedButton"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
-                android:layout_weight="1"
-                android:text="@string/apply_badblocks" />
-        </LinearLayout>
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnViewBadSegments"
-            style="@style/Widget.Material3.Button.TextButton"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="@string/view_bad_segments" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnExportRecoveryScript"
-            style="@style/Widget.Material3.Button.TextButton"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/export_recovery_script" />
-
-        <com.google.android.material.materialswitch.MaterialSwitch
-            android:id="@+id/switchPremium"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:text="@string/premium_mode" />
-
-        <TextView
-            android:id="@+id/premiumWarning"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Premium mode enables advanced root actions. Never auto-apply on mounted system/data partitions. Unmounted/recovery tagging only."
-            android:textAppearance="@style/TextAppearance.Material3.BodySmall" />
-
-        <LinearLayout
-            android:id="@+id/premiumActions"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
             android:orientation="vertical"
             android:visibility="gone">
 
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnApplyUnmounted"
-                style="@style/Widget.Material3.Button.OutlinedButton"
+            <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="@string/apply_unmounted" />
+                android:layout_marginTop="8dp"
+                android:text="Memory card manager (root) - manual overrides"
+                android:textAppearance="@style/TextAppearance.Material3.TitleMedium" />
 
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnExportMagiskScript"
-                style="@style/Widget.Material3.Button.OutlinedButton"
+            <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
-                android:text="@string/export_magisk_script" />
+                android:text="Exports a bad-blocks map from verified bad/permanent sectors. Applying tags requires root and an UNMOUNTED partition; ext2/3/4 uses e2fsck -l. This cannot safely tag sectors on mounted/active system storage."
+                android:textAppearance="@style/TextAppearance.Material3.BodySmall" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:orientation="horizontal">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnExportBadBlocks"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/export_badblocks" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnApplyBadBlocks"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:layout_weight="1"
+                    android:text="@string/apply_badblocks" />
+            </LinearLayout>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnViewBadSegments"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="@string/view_bad_segments" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnExportRecoveryScript"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/export_recovery_script" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnExport"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/export_report" />
+
+            <com.google.android.material.materialswitch.MaterialSwitch
+                android:id="@+id/switchPremium"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="@string/premium_mode" />
+
+            <TextView
+                android:id="@+id/premiumWarning"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Premium mode enables advanced root actions. Never auto-apply on mounted system/data partitions. Unmounted/recovery tagging only."
+                android:textAppearance="@style/TextAppearance.Material3.BodySmall" />
+
+            <LinearLayout
+                android:id="@+id/premiumActions"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnApplyUnmounted"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/apply_unmounted" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnExportMagiskScript"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="@string/export_magisk_script" />
+            </LinearLayout>
+
+            <!-- Legacy buttons kept for compatibility but hidden -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnScanStorage"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/scan_storage"
+                android:visibility="gone" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnScanRaw"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/scan_raw"
+                android:visibility="gone" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnRepair"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/repair"
+                android:visibility="gone" />
         </LinearLayout>
 
         <TextView

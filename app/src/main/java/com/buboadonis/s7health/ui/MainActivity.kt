@@ -7,6 +7,9 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
+import android.os.PowerManager
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -18,19 +21,19 @@ import com.buboadonis.s7health.R
 import com.buboadonis.s7health.databinding.ActivityMainBinding
 import com.buboadonis.s7health.model.BadRegion
 import com.buboadonis.s7health.model.HealthStatus
+import com.buboadonis.s7health.model.ScanMode
 import com.buboadonis.s7health.model.ScanProgress
 import com.buboadonis.s7health.model.ScanState
 import com.buboadonis.s7health.scanner.RawBlockScanner
-import com.buboadonis.s7health.scanner.StorageScanner
+import com.buboadonis.s7health.service.ScanService
 import com.buboadonis.s7health.util.CheckpointStore
-import com.buboadonis.s7health.util.ScanCheckpoint
-import com.buboadonis.s7health.util.SectorMapStore
 import com.buboadonis.s7health.util.RootRepairManager
-import com.buboadonis.s7health.model.ScanMode
+import com.buboadonis.s7health.util.SectorMapStore
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -39,15 +42,14 @@ import java.util.Locale
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
-    private val storageScanner = StorageScanner()
-    private val rawScanner = RawBlockScanner()
     private lateinit var checkpointStore: CheckpointStore
     private lateinit var sectorMapStore: SectorMapStore
     private lateinit var repairManager: RootRepairManager
-    private var scanJob: Job? = null
     private var lastProgress: ScanProgress = ScanProgress()
     private val logLines = ArrayDeque<String>()
     private val maxLogLines = 300
+    private val handler = Handler(Looper.getMainLooper())
+    private var polling = false
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -58,9 +60,25 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        binding.btnScanStorage.setOnClickListener { startStorageScan() }
-        binding.btnScanRaw.setOnClickListener { startRawScanFlow() }
+        checkpointStore = CheckpointStore(this)
+        sectorMapStore = SectorMapStore(this)
+        repairManager = RootRepairManager(this)
+
+        // Single smart button - auto-determines best action
+        binding.btnSmartScan.setOnClickListener { onSmartScanClicked() }
         binding.btnStop.setOnClickListener { stopScan() }
+        binding.btnViewResults.setOnClickListener { viewResults() }
+
+        // Advanced toggle
+        binding.advancedToggle.setOnClickListener {
+            val visible = binding.advancedSection.visibility == android.view.View.VISIBLE
+            binding.advancedSection.visibility = if (visible) android.view.View.GONE else android.view.View.VISIBLE
+            binding.advancedToggle.text = if (visible) "Advanced tools ▼" else "Advanced tools ▲"
+        }
+
+        // Advanced buttons (kept for manual overrides)
+        binding.btnScanStorage.setOnClickListener { onSmartScanClicked() }
+        binding.btnScanRaw.setOnClickListener { onSmartScanClicked() }
         binding.btnRepair.setOnClickListener { repairOrMark() }
         binding.btnExport.setOnClickListener { exportReport() }
         binding.btnExportBadBlocks.setOnClickListener { exportBadBlocksMap() }
@@ -71,17 +89,115 @@ class MainActivity : AppCompatActivity() {
         binding.btnApplyUnmounted.setOnClickListener { applyOnUnmountedFlow() }
         binding.btnExportMagiskScript.setOnClickListener { exportMagiskBootScript() }
 
-        checkpointStore = CheckpointStore(this)
-        sectorMapStore = SectorMapStore(this)
-        repairManager = RootRepairManager(this)
         val premium = getSharedPreferences("s7health", MODE_PRIVATE).getBoolean("premium_mode", false)
         binding.switchPremium.isChecked = premium
         binding.premiumActions.visibility = if (premium) android.view.View.VISIBLE else android.view.View.GONE
+
         updateUi(lastProgress)
         ensurePermissions()
         appendLog("S7 Health Scanner ready. Target device: Samsung Galaxy S7 Edge (or any Android device).")
-        appendLog("File-level scan works without root. Raw block scan requires root.")
-        checkForResume()
+        appendLog("Tap Start - the app auto-detects root/raw vs file scan and runs in background (screen off OK).")
+        appendLog("If phone reboots/crashes, scan auto-resumes from checkpoint. No need to tap Resume.")
+
+        // Auto-resume if checkpoint exists (no dialog)
+        val cp = checkpointStore.load()
+        if (cp != null) {
+            val ageMin = (System.currentTimeMillis() - cp.timestamp) / 60000L
+            appendLog("Found saved checkpoint (${ageMin} min ago). Auto-resuming scan in background...")
+            ScanService.start(this, ScanService.ACTION_RESUME)
+        }
+
+        // Check battery optimization hint
+        checkBatteryOptimization()
+
+        startPolling()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Re-check checkpoint and auto-resume if needed
+        val cp = checkpointStore.load()
+        if (cp != null) {
+            // Service may already be running; starting again is safe (service checks isActive)
+            ScanService.start(this, ScanService.ACTION_RESUME)
+        }
+        pollProgress()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        // Do NOT stop service - it continues in background
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        polling = false
+        handler.removeCallbacksAndMessages(null)
+    }
+
+    private fun startPolling() {
+        polling = true
+        handler.post(object : Runnable {
+            override fun run() {
+                if (!polling) return
+                pollProgress()
+                handler.postDelayed(this, 1000)
+            }
+        })
+    }
+
+    private fun pollProgress() {
+        // Read last_progress.json written by service
+        try {
+            val file = File(filesDir, "last_progress.json")
+            if (file.exists()) {
+                val json = JSONObject(file.readText())
+                val badArr = json.optJSONArray("badRegions") ?: JSONArray()
+                val bad = mutableListOf<BadRegion>()
+                for (i in 0 until badArr.length()) {
+                    val o = badArr.getJSONObject(i)
+                    bad.add(
+                        BadRegion(
+                            pathOrDevice = o.optString("pathOrDevice"),
+                            offsetBytes = o.optLong("offsetBytes"),
+                            lengthBytes = o.optLong("lengthBytes"),
+                            description = o.optString("description"),
+                            repaired = o.optBoolean("repaired"),
+                            markedUnusable = o.optBoolean("markedUnusable")
+                        )
+                    )
+                }
+                val progress = ScanProgress(
+                    state = ScanState.valueOf(json.optString("state", "IDLE")),
+                    mode = ScanMode.valueOf(json.optString("mode", "FILE_LEVEL")),
+                    bytesScanned = json.optLong("bytesScanned"),
+                    totalBytesEstimate = json.optLong("totalBytesEstimate"),
+                    badRegions = bad,
+                    currentTarget = json.optString("currentTarget"),
+                    message = json.optString("message", "Ready."),
+                    health = HealthStatus.valueOf(json.optString("health", "UNKNOWN")),
+                    readErrors = json.optLong("readErrors"),
+                    writeErrors = json.optLong("writeErrors"),
+                    verifiedBytes = json.optLong("verifiedBytes"),
+                    speedBytesPerSec = json.optLong("speedBytesPerSec")
+                )
+                // Only update if newer or different
+                if (progress != lastProgress) {
+                    updateUi(progress)
+                }
+            }
+        } catch (_: Throwable) {}
+
+        // Update smart button label based on checkpoint / running state
+        val cp = try { checkpointStore.load() } catch (_: Throwable) { null }
+        val isScanning = lastProgress.state == ScanState.SCANNING || lastProgress.state == ScanState.REPAIRING
+        binding.btnSmartScan.text = when {
+            isScanning -> getString(R.string.scanning)
+            cp != null -> getString(R.string.resume_scan)
+            else -> getString(R.string.smart_scan)
+        }
+        binding.btnSmartScan.isEnabled = !isScanning
+        binding.btnStop.isEnabled = isScanning
     }
 
     private fun ensurePermissions() {
@@ -101,6 +217,11 @@ class MainActivity : AppCompatActivity() {
                 if (ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED) needed.add(it)
             }
         }
+        if (Build.VERSION.SDK_INT >= 33) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                needed.add(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
         if (needed.isNotEmpty()) {
             permissionLauncher.launch(needed.toTypedArray())
         }
@@ -109,26 +230,36 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun startStorageScan() {
-        if (scanJob?.isActive == true) {
-            toast("A scan is already running.")
-            return
-        }
-        val cp = checkpointStore.load()
-        if (cp != null && cp.mode == ScanMode.FILE_LEVEL) {
-            AlertDialog.Builder(this)
-                .setTitle("Resume previous scan?")
-                .setMessage("A saved file-level checkpoint was found (${RawBlockScanner.formatBytes(cp.bytesScanned)} scanned, ${cp.badRegions.size} issues). Resume to avoid restarting from zero?")
-                .setPositiveButton("Resume") { _, _ -> resumeScan(cp) }
-                .setNegativeButton("Start fresh") { _, _ -> checkpointStore.clear(); startStorageScanAfterPermission() }
-                .setNeutralButton("Cancel", null)
-                .show()
-            return
-        }
-        startStorageScanAfterPermission()
+    private fun checkBatteryOptimization() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                val isIgnoring = pm.isIgnoringBatteryOptimizations(packageName)
+                if (!isIgnoring) {
+                    binding.batteryHint.visibility = android.view.View.VISIBLE
+                    binding.batteryHint.setOnClickListener {
+                        try {
+                            startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+                        } catch (_: Throwable) {
+                            startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+                        }
+                    }
+                }
+            }
+        } catch (_: Throwable) {}
     }
 
-    private fun startStorageScanAfterPermission() {
+    private fun onSmartScanClicked() {
+        val cp = checkpointStore.load()
+        if (cp != null) {
+            // Resume automatically - no dialog
+            appendLog("Resuming scan from checkpoint (${RawBlockScanner.formatBytes(cp.bytesScanned)} scanned)...")
+            ScanService.start(this, ScanService.ACTION_RESUME)
+            toast("Resuming scan in background. You can turn screen off.")
+            return
+        }
+
+        // No checkpoint: check permission for file scan, then start service which auto-detects mode
         if (Build.VERSION.SDK_INT >= 30 && !Environment.isExternalStorageManager()) {
             AlertDialog.Builder(this)
                 .setTitle("Storage permission")
@@ -140,131 +271,64 @@ class MainActivity : AppCompatActivity() {
                         startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
                     }
                 }
-                .setNegativeButton("Limited scan") { _, _ -> launchStorageScan() }
+                .setNegativeButton("Limited scan") { _, _ -> startServiceScan() }
                 .show()
             return
         }
-        launchStorageScan()
+        startServiceScan()
     }
 
-    private fun launchStorageScan(resume: ScanCheckpoint? = null, overrideRoots: List<File>? = null) {
-        val roots = overrideRoots ?: accessibleRoots()
-        if (roots.isEmpty()) {
-            toast("No accessible storage roots found.")
-            return
-        }
-        if (resume == null) checkpointStore.clear()
-        appendLog((if (resume != null) "Resuming" else "Starting") + " file-level scan on: ${roots.joinToString { it.absolutePath }}")
-        scanJob = lifecycleScope.launch {
-            val result = storageScanner.scanAccessible(
-                roots = roots,
-                patternTestMb = 16,
-                resume = resume,
-                onCheckpoint = { checkpointStore.save(it) }
-            ) { progress ->
-                runOnUiThread { updateUi(progress) }
-            }
-            lastProgress = result
-            updateUi(result)
-            if (result.state == ScanState.COMPLETED) checkpointStore.clear()
-            appendLog(result.message)
-        }
-    }
-
-    private fun startRawScanFlow() {
-        if (scanJob?.isActive == true) {
-            toast("A scan is already running.")
-            return
-        }
-        val cp = checkpointStore.load()
-        if (cp != null && cp.mode == ScanMode.RAW_BLOCK) {
-            AlertDialog.Builder(this)
-                .setTitle("Resume previous raw scan?")
-                .setMessage("A saved raw scan checkpoint was found for ${cp.target} at offset ${cp.rawOffsetBytes} (${RawBlockScanner.formatBytes(cp.bytesScanned)} scanned). Resume to avoid restarting from zero?")
-                .setPositiveButton("Resume") { _, _ -> resumeScan(cp) }
-                .setNegativeButton("Start fresh") { _, _ -> checkpointStore.clear(); startRawScanFlowFresh() }
-                .setNeutralButton("Cancel", null)
-                .show()
-            return
-        }
-        startRawScanFlowFresh()
-    }
-
-    private fun startRawScanFlowFresh() {
-        appendLog("Checking root access...")
-        lifecycleScope.launch {
-            val rootAvailable = withContext(Dispatchers.IO) { rawScanner.isRootAvailable() }
-            if (!rootAvailable) {
-                AlertDialog.Builder(this@MainActivity)
-                    .setTitle("Root not available")
-                    .setMessage("Raw sector/block scanning requires root (su). On a non-rooted device, use the file-level scan instead.\n\nYou can still run file-level scans which verify readable files and perform bit-pattern write/read tests on accessible storage.")
-                    .setPositiveButton("OK", null)
-                    .show()
-                appendLog("Root not available. Raw scan unavailable.")
-                return@launch
-            }
-            val devices = withContext(Dispatchers.IO) { rawScanner.listBlockDevices() }
-            if (devices.isEmpty()) {
-                toast("No block devices found.")
-                appendLog("No block devices enumerated.")
-                return@launch
-            }
-            val labels = devices.map {
-                val size = if (it.sizeBytes > 0) RawBlockScanner.formatBytes(it.sizeBytes) else "unknown size"
-                "${it.name} ($size) - ${it.path}"
-            }.toTypedArray()
-            AlertDialog.Builder(this@MainActivity)
-                .setTitle("Select block device")
-                .setItems(labels) { _, which ->
-                    confirmRawScan(devices[which])
-                }
-                .setNegativeButton("Cancel", null)
-                .show()
-        }
-    }
-
-    private fun confirmRawScan(device: RawBlockScanner.BlockDevice) {
-        val sizeText = if (device.sizeBytes > 0) RawBlockScanner.formatBytes(device.sizeBytes) else "unknown size"
-        AlertDialog.Builder(this)
-            .setTitle("Raw scan")
-            .setMessage(
-                "Scan ${device.name} (${device.path}, $sizeText)?\n\n" +
-                "This performs read-only sector/block reads. It may take a long time on large devices. " +
-                "No data is written during scan. Progress is checkpointed before each chunk so you can resume if the device restarts. " +
-                "If the device is the active system partition, scan it only if you understand the risk of I/O stress."
-            )
-            .setPositiveButton("Scan") { _, _ -> launchRawScan(device) }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    private fun launchRawScan(device: RawBlockScanner.BlockDevice, resume: ScanCheckpoint? = null) {
-        if (resume == null) checkpointStore.clear()
-        appendLog((if (resume != null) "Resuming" else "Starting") + " raw scan: ${device.path}")
-        scanJob = lifecycleScope.launch {
-            val result = rawScanner.scanBlockDevice(
-                device = device,
-                resume = resume,
-                sectorMap = sectorMapStore,
-                onCheckpoint = { checkpointStore.save(it) }
-            ) { progress ->
-                runOnUiThread { updateUi(progress) }
-            }
-            lastProgress = result
-            updateUi(result)
-            if (result.state == ScanState.COMPLETED) checkpointStore.clear()
-            appendLog(result.message)
-        }
+    private fun startServiceScan() {
+        appendLog("Starting smart scan (auto-detecting root/raw vs file)...")
+        ScanService.start(this, ScanService.ACTION_START)
+        toast("Scanning in background. Screen off is OK.")
     }
 
     private fun stopScan() {
-        if (scanJob?.isActive == true) {
-            scanJob?.cancel()
-            appendLog("Cancellation requested.")
-        } else {
-            toast("No scan running.")
-        }
+        ScanService.stop(this)
+        appendLog("Stop requested. Progress saved for auto-resume.")
+        toast("Scan stopped. Progress saved - will auto-resume on next start/boot.")
     }
+
+    private fun viewResults() {
+        val p = lastProgress
+        val sb = StringBuilder()
+        sb.appendLine("Health: ${p.health}")
+        sb.appendLine("State: ${p.state} (${p.mode})")
+        sb.appendLine("Scanned: ${RawBlockScanner.formatBytes(p.bytesScanned)}")
+        sb.appendLine("Verified: ${RawBlockScanner.formatBytes(p.verifiedBytes)}")
+        sb.appendLine("Read errors: ${p.readErrors}, Write errors: ${p.writeErrors}")
+        sb.appendLine("Bad regions: ${p.badRegions.size}")
+        sb.appendLine()
+        if (p.badRegions.isEmpty()) {
+            sb.appendLine("No issues found in last scan.")
+        } else {
+            p.badRegions.take(30).forEachIndexed { i, r ->
+                sb.appendLine("${i + 1}. ${r.pathOrDevice} @${r.offsetBytes}+${r.lengthBytes}")
+                sb.appendLine("   ${r.description}")
+            }
+            if (p.badRegions.size > 30) sb.appendLine("... ${p.badRegions.size - 30} more")
+        }
+        sb.appendLine()
+        sb.appendLine("Sector map:")
+        val summary = sectorMapStore.summary()
+        if (summary.isEmpty()) {
+            sb.appendLine("No sector map data yet.")
+        } else {
+            summary.forEach { (target, counts) ->
+                sb.appendLine("Target: $target")
+                counts.forEach { (status, bytes) -> sb.appendLine("  $status: ${RawBlockScanner.formatBytes(bytes)}") }
+            }
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Scan Results (auto-generated)")
+            .setMessage(sb.toString().take(4000))
+            .setPositiveButton("OK", null)
+            .setNeutralButton("Export Report") { _, _ -> exportReport() }
+            .show()
+    }
+
+    // --- Advanced / manual actions (kept for power users) ---
 
     private fun repairOrMark() {
         val progress = lastProgress
@@ -436,9 +500,7 @@ class MainActivity : AppCompatActivity() {
             "Unverified: UNHEALTHY by policy"
 
         val running = p.state == ScanState.SCANNING || p.state == ScanState.REPAIRING
-        binding.btnScanStorage.isEnabled = !running
-        binding.btnScanRaw.isEnabled = !running
-        binding.btnRepair.isEnabled = !running
+        binding.btnSmartScan.isEnabled = !running
         binding.btnStop.isEnabled = running
     }
 
@@ -461,8 +523,6 @@ class MainActivity : AppCompatActivity() {
         val sb = StringBuilder()
         sb.appendLine("Policy: UNVERIFIED=UNHEALTHY by default. BAD_PERMANENT sectors are never rescanned.")
         sb.appendLine()
-        var totalBad = 0L
-        var totalHealthy = 0L
         if (summary.isEmpty()) {
             sb.appendLine("No sector map data yet. Run a scan to build the map.")
         } else {
@@ -470,8 +530,6 @@ class MainActivity : AppCompatActivity() {
                 sb.appendLine("Target: $target")
                 counts.forEach { (status, bytes) ->
                     sb.appendLine("  $status: ${RawBlockScanner.formatBytes(bytes)}")
-                    if (status == com.buboadonis.s7health.util.SectorStatus.BAD_PERMANENT) totalBad += bytes
-                    if (status == com.buboadonis.s7health.util.SectorStatus.HEALTHY) totalHealthy += bytes
                 }
                 val bads = sectorMapStore.badRanges(target)
                 bads.take(50).forEach { r ->
@@ -682,50 +740,6 @@ class MainActivity : AppCompatActivity() {
                 .setPositiveButton("OK", null)
                 .show()
         }
-    }
-
-    private fun checkForResume() {
-        val cp = checkpointStore.load() ?: return
-        val ageMin = (System.currentTimeMillis() - cp.timestamp) / 60000L
-        val modeLabel = if (cp.mode == ScanMode.FILE_LEVEL) "File-level scan" else "Raw scan (${cp.target})"
-        AlertDialog.Builder(this)
-            .setTitle("Resume previous scan?")
-            .setMessage("$modeLabel\nProgress: ${RawBlockScanner.formatBytes(cp.bytesScanned)} scanned, ${cp.badRegions.size} issue(s) found.\nSaved ${ageMin} min ago.\n\nResuming avoids re-scanning from the beginning after a restart/crash.")
-            .setPositiveButton("Resume") { _, _ -> resumeScan(cp) }
-            .setNegativeButton("Discard") { _, _ -> checkpointStore.clear() }
-            .show()
-    }
-
-    private fun resumeScan(cp: ScanCheckpoint) {
-        if (scanJob?.isActive == true) { toast("A scan is already running."); return }
-        when (cp.mode) {
-            ScanMode.FILE_LEVEL -> {
-                val roots = cp.roots.map { File(it) }.filter { it.exists() }.ifEmpty { accessibleRoots() }
-                appendLog("Resuming file-level scan from checkpoint (${cp.fileIndex} files, ${RawBlockScanner.formatBytes(cp.bytesScanned)} scanned)...")
-                launchStorageScan(resume = cp, overrideRoots = roots)
-            }
-            ScanMode.RAW_BLOCK -> {
-                val device = RawBlockScanner.BlockDevice(cp.target, File(cp.target).name, cp.rawTotalBytes)
-                appendLog("Resuming raw scan on ${cp.target} from offset ${cp.rawOffsetBytes}...")
-                launchRawScan(device, resume = cp)
-            }
-        }
-    }
-
-    private fun accessibleRoots(): List<File> {
-        val roots = mutableListOf<File>()
-        // App-specific external dirs are always accessible
-        getExternalFilesDir(null)?.let { roots.add(it) }
-        filesDir?.let { roots.add(it) }
-        // Public storage
-        val ext = Environment.getExternalStorageDirectory()
-        if (ext != null && ext.exists()) roots.add(ext)
-        // Common S7 paths
-        listOf("/storage/emulated/0", "/sdcard").forEach { p ->
-            val f = File(p)
-            if (f.exists()) roots.add(f)
-        }
-        return roots.distinctBy { it.absolutePath }.filter { it.exists() }
     }
 
     private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()

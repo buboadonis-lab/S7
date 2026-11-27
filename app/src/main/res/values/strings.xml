@@ -13,6 +13,10 @@
     <string name="apply_unmounted">Apply on Unmounted (Root)</string>
     <string name="export_magisk_script">Export Magisk Boot Script</string>
     <string name="health_unknown">Health: Unknown</string>
-    <string name="status_idle">Ready. Select a scan mode.</string>
-    <string name="disclaimer">Policy: All sectors/bits are treated as UNHEALTHY unless verified healthy by a completed scan. If the phone powers off/restarts during a scan, the in-progress sector/bit is marked PERMANENTLY UNUSABLE and is never rescanned. The app keeps a persistent healthy/bad sector map. Manual scan control only. Note: Android apps cannot force other apps to use specific physical sectors; OS/filesystem-level enforcement requires root/system support. Raw block scans require root.</string>
+    <string name="status_idle">Ready. Tap Start to scan. Scanning continues with screen off and auto-resumes after reboot.</string>
+    <string name="smart_scan">Start Scan</string>
+    <string name="resume_scan">Resume Scan</string>
+    <string name="scanning">Scanning…</string>
+    <string name="view_results">View Results</string>
+    <string name="disclaimer">Policy: All sectors/bits are treated as UNHEALTHY unless verified healthy by a completed scan. If the phone powers off/restarts during a scan, the in-progress sector/bit is marked PERMANENTLY UNUSABLE and is never rescanned. The app keeps a persistent healthy/bad sector map. Scanning runs in the background (screen off OK) and auto-resumes after crash/reboot. After scanning, the app automatically quarantines bad files, exports reports, and tags bad sectors when safe (root + unmounted). Note: Android apps cannot force other apps to use specific physical sectors; OS/filesystem-level enforcement requires root/system support. Raw block scans require root.</string>
 </resources>
