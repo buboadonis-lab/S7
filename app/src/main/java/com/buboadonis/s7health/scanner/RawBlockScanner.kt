@@ -39,6 +39,16 @@ class RawBlockScanner {
         private const val MEDIUM_CHUNK = 64L * 1024 // 64KB
         private const val SMALL_CHUNK = 4096L // 4KB single block
         private const val MAX_RETRIES = 3
+
+        fun formatBytes(bytes: Long): String {
+            if (bytes < 1024) return "$bytes B"
+            val kb = bytes / 1024.0
+            if (kb < 1024) return "%.1f KB".format(kb)
+            val mb = kb / 1024.0
+            if (mb < 1024) return "%.1f MB".format(mb)
+            val gb = mb / 1024.0
+            return "%.2f GB".format(gb)
+        }
     }
 
     fun isRootAvailable(): Boolean {
@@ -395,15 +405,4 @@ class RawBlockScanner {
         else -> HealthStatus.CRITICAL
     }
 
-    companion object {
-        fun formatBytes(bytes: Long): String {
-            if (bytes < 1024) return "$bytes B"
-            val kb = bytes / 1024.0
-            if (kb < 1024) return "%.1f KB".format(kb)
-            val mb = kb / 1024.0
-            if (mb < 1024) return "%.1f MB".format(mb)
-            val gb = mb / 1024.0
-            return "%.2f GB".format(gb)
-        }
-    }
 }
