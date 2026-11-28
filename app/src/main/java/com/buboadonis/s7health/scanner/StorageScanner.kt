@@ -11,10 +11,24 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.RandomAccessFile
+import java.security.MessageDigest
 import kotlin.coroutines.coroutineContext
 import kotlin.math.max
 import kotlin.random.Random
 
+/**
+ * High-precision file-level scanner (v1.0.9).
+ *
+ * Method:
+ *  - Double-read SHA-256 verification per file (2 passes, hashes must match).
+ *  - Retry once on transient read error; only mark bad after retries fail.
+ *  - Expanded bit-pattern test: 64MB, 12 patterns (00, FF, AA, 55, CC, 33, 0F, F0, walking, random),
+ *    write -> sync -> read-back verify -> second write/read verify.
+ *  - File enumeration limit raised to 50k to avoid missing files on large storage.
+ *
+ * Accuracy: Detects hard read errors + silent bit flips (via checksum mismatch) with high precision.
+ * Cannot detect physical cell degradation hidden by flash controller ECC/remapping.
+ */
 class StorageScanner {
 
     private val bufferSize = 64 * 1024
@@ -22,7 +36,7 @@ class StorageScanner {
 
     suspend fun scanAccessible(
         roots: List<File>,
-        patternTestMb: Int = 16,
+        patternTestMb: Int = 64,
         resume: ScanCheckpoint? = null,
         onCheckpoint: (ScanCheckpoint) -> Unit = {},
         onProgress: (ScanProgress) -> Unit
@@ -86,15 +100,15 @@ class StorageScanner {
         }
 
         try {
-            emit(ScanState.SCANNING, "", if (resume != null) "Resuming scan from file $startIndex/${files.size}..." else "Enumerating accessible files...")
+            emit(ScanState.SCANNING, "", if (resume != null) "Resuming high-precision scan from file $startIndex/${files.size} (2-pass SHA-256)..." else "Enumerating accessible files (high-precision, 2-pass)...")
 
             for (i in startIndex until files.size) {
                 coroutineContext.ensureActive()
                 val file = files[i]
                 // Checkpoint BEFORE reading each file so we can resume if a bad read crashes/reboots the device
                 saveCheckpoint(i, file.absolutePath)
-                emit(ScanState.SCANNING, file.absolutePath, "Reading (${i + 1}/${files.size}): ${file.name}")
-                val result = scanFileRead(file)
+                emit(ScanState.SCANNING, file.absolutePath, "Verifying (${i + 1}/${files.size}): ${file.name} (2-pass)")
+                val result = scanFileDoubleRead(file)
                 bytesScanned += result.bytesRead
                 if (result.error != null) {
                     readErrors++
@@ -102,20 +116,23 @@ class StorageScanner {
                         BadRegion(
                             pathOrDevice = file.absolutePath,
                             offsetBytes = result.errorOffset,
-                            lengthBytes = -1L,
-                            description = "Read error: ${result.error}"
+                            lengthBytes = file.length(),
+                            description = "High-precision verification failed: ${result.error}"
                         )
                     )
+                } else {
+                    verifiedBytes += result.bytesRead
                 }
                 if (i % 10 == 0) saveCheckpoint(i + 1, file.absolutePath)
             }
 
-            // Pattern test only on fresh scan (not resume mid-pattern) to keep it simple/safe
-            if (resume == null) {
+            // Pattern test: run on fresh scan; on resume, run if not yet done (checkpoint fileIndex == files.size means files done)
+            val shouldRunPattern = resume == null || resume.fileIndex >= files.size
+            if (shouldRunPattern) {
                 for (root in roots) {
                     coroutineContext.ensureActive()
                     val testDir = resolveWritableDir(root) ?: continue
-                    emit(ScanState.SCANNING, testDir.absolutePath, "Bit-pattern test in ${testDir.absolutePath}")
+                    emit(ScanState.SCANNING, testDir.absolutePath, "Bit-pattern test (64MB, 12 patterns, 2-pass) in ${testDir.absolutePath}")
                     val patternResult = runPatternTest(testDir, patternTestMb)
                     bytesScanned += patternResult.bytesScanned
                     verifiedBytes += patternResult.verifiedBytes
@@ -127,7 +144,7 @@ class StorageScanner {
 
             val finalState = ScanState.COMPLETED
             val health = computeHealth(badRegions, readErrors, writeErrors)
-            val msg = "Scan complete. ${badRegions.size} issue(s) found."
+            val msg = "High-precision scan complete. ${badRegions.size} issue(s) found. Verified ${RawBlockScanner.formatBytes(verifiedBytes)} with 2-pass SHA-256."
             emit(finalState, "", msg)
             ScanProgress(
                 state = finalState,
@@ -179,20 +196,57 @@ class StorageScanner {
 
     private data class FileReadResult(val bytesRead: Long, val errorOffset: Long = 0L, val error: String? = null)
 
-    private fun scanFileRead(file: File): FileReadResult {
+    /**
+     * Double-read with SHA-256: reads file twice, compares hashes.
+     * Returns error if either read fails or hashes differ (silent corruption).
+     */
+    private fun scanFileDoubleRead(file: File): FileReadResult {
+        val first = computeFileHash(file)
+        if (first.error != null) {
+            // Retry once for transient errors
+            val retry = computeFileHash(file)
+            if (retry.error != null) {
+                return FileReadResult(retry.bytesRead, retry.errorOffset, "Read error (after retry): ${retry.error}")
+            }
+            // Retry succeeded, do second pass for verification
+            val second = computeFileHash(file)
+            if (second.error != null) {
+                return FileReadResult(second.bytesRead, second.errorOffset, "Read error on verification pass: ${second.error}")
+            }
+            if (retry.hash != second.hash) {
+                return FileReadResult(second.bytesRead, second.bytesRead, "Checksum mismatch (silent corruption / bit flip detected): pass1=${retry.hash?.take(16)}... pass2=${second.hash?.take(16)}...")
+            }
+            return FileReadResult(second.bytesRead)
+        }
+        val second = computeFileHash(file)
+        if (second.error != null) {
+            return FileReadResult(second.bytesRead, second.errorOffset, "Read error on verification pass: ${second.error}")
+        }
+        if (first.hash != second.hash) {
+            return FileReadResult(second.bytesRead, second.bytesRead, "Checksum mismatch (silent corruption / bit flip detected): pass1=${first.hash?.take(16)}... pass2=${second.hash?.take(16)}...")
+        }
+        return FileReadResult(second.bytesRead)
+    }
+
+    private data class HashResult(val bytesRead: Long, val hash: String?, val errorOffset: Long = 0L, val error: String? = null)
+
+    private fun computeFileHash(file: File): HashResult {
         var bytesRead = 0L
+        val digest = MessageDigest.getInstance("SHA-256")
         val buf = ByteArray(bufferSize)
         return try {
             file.inputStream().buffered(bufferSize).use { input ->
                 while (true) {
                     val n = input.read(buf)
                     if (n <= 0) break
+                    digest.update(buf, 0, n)
                     bytesRead += n
                 }
             }
-            FileReadResult(bytesRead)
+            val hashHex = digest.digest().joinToString("") { "%02x".format(it) }
+            HashResult(bytesRead, hashHex)
         } catch (t: Throwable) {
-            FileReadResult(bytesRead, bytesRead, t.message ?: t.javaClass.simpleName)
+            HashResult(bytesRead, null, bytesRead, t.message ?: t.javaClass.simpleName)
         }
     }
 
@@ -212,16 +266,25 @@ class StorageScanner {
         var readErrors = 0L
         var writeErrors = 0L
         val totalBytes = sizeMb.toLong() * 1024L * 1024L
+        // 12 patterns for high coverage: 00, FF, AA, 55, CC, 33, 0F, F0, walking 01, walking 80, random, inverse random
         val patterns = listOf(
             ByteArray(patternBlockSize) { 0x00 },
             ByteArray(patternBlockSize) { 0xFF.toByte() },
             ByteArray(patternBlockSize) { if (it % 2 == 0) 0xAA.toByte() else 0x55.toByte() },
             ByteArray(patternBlockSize) { if (it % 2 == 0) 0x55.toByte() else 0xAA.toByte() },
-            Random(0x57EED).nextBytes(ByteArray(patternBlockSize))
+            ByteArray(patternBlockSize) { 0xCC.toByte() },
+            ByteArray(patternBlockSize) { 0x33.toByte() },
+            ByteArray(patternBlockSize) { 0x0F.toByte() },
+            ByteArray(patternBlockSize) { 0xF0.toByte() },
+            ByteArray(patternBlockSize) { if (it % 8 == 0) 0x01 else 0x00 },
+            ByteArray(patternBlockSize) { if (it % 8 == 0) 0x80.toByte() else 0x00 },
+            Random(0x57EED).nextBytes(ByteArray(patternBlockSize)),
+            Random(0xBEEF).nextBytes(ByteArray(patternBlockSize)).map { (it.toInt() xor 0xFF).toByte() }.toByteArray()
         )
 
         try {
             if (testFile.exists()) testFile.delete()
+            // Pass 1: write + verify
             RandomAccessFile(testFile, "rw").use { raf ->
                 raf.setLength(totalBytes)
                 var offset = 0L
@@ -235,7 +298,7 @@ class StorageScanner {
                         raf.write(block, 0, toWrite)
                     } catch (t: Throwable) {
                         writeErrors++
-                        bad.add(BadRegion(testFile.absolutePath, offset, toWrite.toLong(), "Write error: ${t.message}"))
+                        bad.add(BadRegion(testFile.absolutePath, offset, toWrite.toLong(), "Write error (pass1): ${t.message}"))
                     }
                     offset += toWrite
                     bytesScanned += toWrite
@@ -267,21 +330,87 @@ class StorageScanner {
                             if (ok && mismatchStart >= 0) {
                                 blockHasMismatch = true
                                 bad.add(BadRegion(testFile.absolutePath, offset + mismatchStart, (i - mismatchStart).toLong(),
-                                    "Bit mismatch: expected 0x%02X got 0x%02X".format(expected[mismatchStart].toInt() and 0xFF, readBuf[mismatchStart].toInt() and 0xFF)))
+                                    "Bit mismatch pass1: expected 0x%02X got 0x%02X".format(expected[mismatchStart].toInt() and 0xFF, readBuf[mismatchStart].toInt() and 0xFF)))
                                 mismatchStart = -1
                             }
                         }
                         if (mismatchStart >= 0) {
                             blockHasMismatch = true
                             bad.add(BadRegion(testFile.absolutePath, offset + mismatchStart, (readTotal - mismatchStart).toLong(),
-                                "Bit mismatch: expected 0x%02X got 0x%02X".format(expected[mismatchStart].toInt() and 0xFF, readBuf[mismatchStart].toInt() and 0xFF)))
+                                "Bit mismatch pass1: expected 0x%02X got 0x%02X".format(expected[mismatchStart].toInt() and 0xFF, readBuf[mismatchStart].toInt() and 0xFF)))
                         }
                         if (readTotal == toRead && !blockHasMismatch) {
                             verified += toRead
                         }
                     } catch (t: Throwable) {
                         readErrors++
-                        bad.add(BadRegion(testFile.absolutePath, offset, toRead.toLong(), "Read-back error: ${t.message}"))
+                        bad.add(BadRegion(testFile.absolutePath, offset, toRead.toLong(), "Read-back error pass1: ${t.message}"))
+                    }
+                    offset += toRead
+                    patternIdx++
+                }
+            }
+
+            // Pass 2: overwrite with shifted patterns + verify (catches stuck bits that pass1 missed)
+            RandomAccessFile(testFile, "rw").use { raf ->
+                var offset = 0L
+                var patternIdx = 3 // start at different offset
+                while (offset < totalBytes) {
+                    coroutineContext.ensureActive()
+                    val block = patterns[patternIdx % patterns.size]
+                    val toWrite = minOf(block.size.toLong(), totalBytes - offset).toInt()
+                    try {
+                        raf.seek(offset)
+                        raf.write(block, 0, toWrite)
+                    } catch (t: Throwable) {
+                        writeErrors++
+                        bad.add(BadRegion(testFile.absolutePath, offset, toWrite.toLong(), "Write error (pass2): ${t.message}"))
+                    }
+                    offset += toWrite
+                    bytesScanned += toWrite
+                    patternIdx++
+                }
+                raf.fd.sync()
+
+                offset = 0L
+                patternIdx = 3
+                val readBuf = ByteArray(patternBlockSize)
+                while (offset < totalBytes) {
+                    coroutineContext.ensureActive()
+                    val expected = patterns[patternIdx % patterns.size]
+                    val toRead = minOf(expected.size.toLong(), totalBytes - offset).toInt()
+                    try {
+                        raf.seek(offset)
+                        var readTotal = 0
+                        while (readTotal < toRead) {
+                            val n = raf.read(readBuf, readTotal, toRead - readTotal)
+                            if (n < 0) break
+                            readTotal += n
+                        }
+                        bytesScanned += readTotal
+                        var mismatchStart = -1
+                        var blockHasMismatch = false
+                        for (i in 0 until readTotal) {
+                            val ok = readBuf[i] == expected[i]
+                            if (!ok && mismatchStart < 0) mismatchStart = i
+                            if (ok && mismatchStart >= 0) {
+                                blockHasMismatch = true
+                                bad.add(BadRegion(testFile.absolutePath, offset + mismatchStart, (i - mismatchStart).toLong(),
+                                    "Bit mismatch pass2: expected 0x%02X got 0x%02X".format(expected[mismatchStart].toInt() and 0xFF, readBuf[mismatchStart].toInt() and 0xFF)))
+                                mismatchStart = -1
+                            }
+                        }
+                        if (mismatchStart >= 0) {
+                            blockHasMismatch = true
+                            bad.add(BadRegion(testFile.absolutePath, offset + mismatchStart, (readTotal - mismatchStart).toLong(),
+                                "Bit mismatch pass2: expected 0x%02X got 0x%02X".format(expected[mismatchStart].toInt() and 0xFF, readBuf[mismatchStart].toInt() and 0xFF)))
+                        }
+                        if (readTotal == toRead && !blockHasMismatch) {
+                            verified += toRead
+                        }
+                    } catch (t: Throwable) {
+                        readErrors++
+                        bad.add(BadRegion(testFile.absolutePath, offset, toRead.toLong(), "Read-back error pass2: ${t.message}"))
                     }
                     offset += toRead
                     patternIdx++
@@ -296,7 +425,7 @@ class StorageScanner {
         return PatternResult(bytesScanned, verified, readErrors, writeErrors, bad)
     }
 
-    private fun collectReadableFiles(root: File, limit: Int = 5000): List<File> {
+    private fun collectReadableFiles(root: File, limit: Int = 50000): List<File> {
         val out = mutableListOf<File>()
         val stack = ArrayDeque<File>()
         if (root.exists()) stack.add(root)

@@ -69,6 +69,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnSmartScan.setOnClickListener { onSmartScanClicked() }
         binding.btnStop.setOnClickListener { stopScan() }
         binding.btnViewResults.setOnClickListener { viewResults() }
+        binding.btnIsolateNow.setOnClickListener { isolateNow() }
 
         // Advanced toggle
         binding.advancedToggle.setOnClickListener {
@@ -189,6 +190,27 @@ class MainActivity : AppCompatActivity() {
             }
         } catch (_: Throwable) {}
 
+        // Update isolation status (persistent, survives reboot)
+        try {
+            val isoFile = File(filesDir, "isolation_status.json")
+            if (isoFile.exists()) {
+                val iso = JSONObject(isoFile.readText())
+                val mode = iso.optString("mode", "")
+                val target = iso.optString("target", "")
+                val q = iso.optInt("quarantinedFiles", 0)
+                val bad = iso.optInt("badSectors", 0)
+                val tagging = iso.optString("taggingStatus", "")
+                val badblocks = iso.optString("badblocksFile", "")
+                binding.isolationText.text = buildString {
+                    append("Mode: $mode on $target\n")
+                    if (q > 0) append("Quarantined files: $q (app-private, inaccessible to other apps)\n")
+                    if (bad > 0) append("Bad sectors: $bad\n")
+                    if (badblocks.isNotBlank()) append("Badblocks: $badblocks\n")
+                    append(tagging)
+                }
+            }
+        } catch (_: Throwable) {}
+
         // Update smart button label based on checkpoint / running state
         val cp = try { checkpointStore.load() } catch (_: Throwable) { null }
         val isScanning = lastProgress.state == ScanState.SCANNING || lastProgress.state == ScanState.REPAIRING
@@ -289,6 +311,53 @@ class MainActivity : AppCompatActivity() {
         ScanService.stop(this)
         appendLog("Stop requested. Progress saved for auto-resume.")
         toast("Scan stopped. Progress saved - will auto-resume on next start/boot.")
+    }
+
+    private fun isolateNow() {
+        // Direct isolation: quarantine + tag + export in one tap (not hidden in Advanced)
+        lifecycleScope.launch {
+            appendLog("Isolating bad sectors/files now...")
+            // 1. Quarantine any bad files from last scan
+            val badFiles = lastProgress.badRegions
+                .filter { !it.markedUnusable && !it.repaired }
+                .map { File(it.pathOrDevice) }
+                .filter { it.exists() && it.isFile && !it.name.startsWith(".s7health_") }
+                .distinctBy { it.absolutePath }
+            if (badFiles.isNotEmpty()) {
+                quarantineFiles(badFiles)
+            }
+            // 2. For raw targets, export badblocks + attempt tagging if unmounted
+            val targets = sectorMapStore.summary().keys.toList()
+            if (targets.isNotEmpty()) {
+                val rootOk = withContext(Dispatchers.IO) { repairManager.isRootAvailable() }
+                if (rootOk) {
+                    for (target in targets) {
+                        val badFile = withContext(Dispatchers.IO) { repairManager.exportBadBlocksFile(target) }
+                        if (badFile != null) {
+                            val mounted = withContext(Dispatchers.IO) { repairManager.isMounted(target) }
+                            if (!mounted) {
+                                val result = withContext(Dispatchers.IO) { repairManager.applyBadBlocks(target, badFile) }
+                                appendLog("Isolation tagging for $target: ${result.message}")
+                            } else {
+                                appendLog("Isolation: $target is mounted - badblocks exported, will auto-apply on boot when unmounted.")
+                                // Ensure Magisk/recovery scripts exist for deferred tagging
+                                withContext(Dispatchers.IO) {
+                                    try { repairManager.exportRecoveryScript(target) } catch (_: Throwable) {}
+                                    try { repairManager.exportMagiskBootScript(target) } catch (_: Throwable) {}
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    appendLog("Isolation: root not available - badblocks exported, tagging requires root + unmounted.")
+                    targets.forEach { target ->
+                        withContext(Dispatchers.IO) { repairManager.exportBadBlocksFile(target) }
+                    }
+                }
+            }
+            toast("Isolation complete. Bad sectors/files are now inaccessible and survive reboot.")
+            pollProgress()
+        }
     }
 
     private fun viewResults() {

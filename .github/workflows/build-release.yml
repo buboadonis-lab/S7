@@ -48,9 +48,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="v1.0.8"
+          TAG="v1.0.9"
           {
-            echo "S7 Health Scanner v1.0.8"
+            echo "S7 Health Scanner v1.0.9"
             echo ""
             echo "## What's included"
             echo "- Android APK: \`s7-health-scanner.apk\`"
@@ -74,6 +74,6 @@ jobs:
           else
             gh release create "$TAG" dist/s7-health-scanner.apk \
               --target "${{ github.sha }}" \
-              --title "v1.0.8 - S7 Health Scanner" \
+              --title "v1.0.9 - S7 Health Scanner" \
               --notes-file /tmp/release-notes.md
           fi
